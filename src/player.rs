@@ -5,14 +5,12 @@ use bevy::prelude::*;
 use crate::animation::{play, AnimationClip, AnimationTimer};
 use crate::world::GROUND_Y;
 
-/// `spartan_combat.png` is 648x192 — a 6x3 grid of 108x64 cells. Row 0 walks,
-/// row 1 thrusts, row 2 blocks. The cell is far wider than the character because
-/// the torso anchor sits at its horizontal centre (so `flip_x` mirrors in place)
-/// while the spear reaches ~52px forward. Regenerate with
-/// `tools/process_sprite.py`.
+/// `spartan_walk.png` contains the first five poses from `spartan_walking.png`,
+/// normalized into 108x64 cells by `tools/process_walking_sprite.py`.
 const FRAME_SIZE: UVec2 = UVec2::new(108, 64);
-const FRAME_COLUMNS: u32 = 6;
-const FRAME_ROWS: u32 = 3;
+const WALK_FRAME_COLUMNS: u32 = 5;
+const ATTACK_FRAME_COLUMNS: u32 = 5;
+const ATTACK_FRAME_ROWS: u32 = 3;
 
 /// Distance from the sprite's centre down to the character's feet. Every frame
 /// is baselined 2px above the cell bottom.
@@ -36,21 +34,18 @@ const ATTACK_DURATION: f32 = ATTACK_STARTUP + ATTACK_ACTIVE + ATTACK_RECOVERY;
 /// Modest forward drive so the thrust travels instead of rooting in place.
 const ATTACK_LUNGE_SPEED: f32 = 90.0;
 
-/// Measured off the thrust frames: at full extension the spear tip reaches 50px
-/// forward of the sprite's centre and sits ~10px below it.
+/// Reach matched to the fully extended frames in `spartan_attack_game.png`.
 const HITBOX_SIZE: Vec2 = Vec2::new(40.0, 16.0);
 const HITBOX_FORWARD_OFFSET: f32 = 30.0;
 const HITBOX_VERTICAL_OFFSET: f32 = -10.0;
 
-const WALK_CLIP: AnimationClip = AnimationClip::new(0, 5, 0.09);
-const IDLE_CLIP: AnimationClip = AnimationClip::still(0);
-const AIRBORNE_CLIP: AnimationClip = AnimationClip::still(2);
-/// Row 1 of the sheet. Frame time is derived from the attack's real duration so
-/// the animation can never drift out of sync with the hitbox timing.
-const ATTACK_CLIP: AnimationClip = AnimationClip::new(6, 11, ATTACK_DURATION / 6.0);
-/// Row 2. Raise the shield and hold it there. Frames 14-15 are the spark-lit
-/// impact poses — those belong to taking a hit, so they wait for enemies.
-const BLOCK_CLIP: AnimationClip = AnimationClip::once(12, 13, 0.07);
+const WALK_CLIP: AnimationClip = AnimationClip::new(0, 4, 0.09);
+/// All fifteen attack frames run once over the same clock as its hitbox phases.
+const ATTACK_CLIP: AnimationClip =
+    AnimationClip::once(0, 14, ATTACK_DURATION / 15.0);
+/// Until their dedicated PNG files arrive, other non-walking actions hold a
+/// neutral pose from the walking sheet.
+const FALLBACK_CLIP: AnimationClip = AnimationClip::still(0);
 
 pub struct PlayerPlugin;
 
@@ -125,33 +120,61 @@ pub struct Blocking;
 #[derive(Component)]
 pub struct AttackHitbox;
 
+/// Action-specific image and atlas handles. New animations can be added here
+/// without combining unrelated actions into one source sheet.
+#[derive(Component)]
+struct PlayerSpriteSheets {
+    walk_image: Handle<Image>,
+    walk_layout: Handle<TextureAtlasLayout>,
+    attack_image: Handle<Image>,
+    attack_layout: Handle<TextureAtlasLayout>,
+}
+
 fn spawn_player(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    let layout = layouts.add(TextureAtlasLayout::from_grid(
+    let walk_layout = layouts.add(TextureAtlasLayout::from_grid(
         FRAME_SIZE,
-        FRAME_COLUMNS,
-        FRAME_ROWS,
+        WALK_FRAME_COLUMNS,
+        1,
         None,
         None,
     ));
+    let attack_layout = layouts.add(TextureAtlasLayout::from_grid(
+        FRAME_SIZE,
+        ATTACK_FRAME_COLUMNS,
+        ATTACK_FRAME_ROWS,
+        None,
+        None,
+    ));
+    let walk_image = asset_server.load("sprites/spartan_walk.png");
+    let attack_image = asset_server.load("sprites/spartan_attack_game.png");
 
     commands.spawn((
         Name::new("Player"),
         Player,
         Sprite::from_atlas_image(
-            asset_server.load("sprites/spartan_combat.png"),
-            TextureAtlas { layout, index: 0 },
+            walk_image.clone(),
+            TextureAtlas {
+                layout: walk_layout.clone(),
+                index: 0,
+            },
         ),
         Transform::from_xyz(0.0, GROUND_Y + HALF_HEIGHT, 10.0),
         Velocity::default(),
         Grounded(true),
         Facing(1.0),
         Intent::default(),
-        IDLE_CLIP,
+        FALLBACK_CLIP,
         AnimationTimer::from_clip(&WALK_CLIP),
+        PlayerSpriteSheets {
+            walk_image,
+            walk_layout,
+            attack_image,
+            attack_layout,
+        },
     ));
 }
 
@@ -554,6 +577,59 @@ mod tests {
             .0;
         assert_eq!(facing_during, -1.0, "facing must not flip mid-thrust");
     }
+
+    #[test]
+    fn walking_uses_the_five_frame_walk_cycle() {
+        let mut app = test_app();
+
+        let idle_image = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<Player>>()
+            .single(app.world())
+            .unwrap()
+            .image
+            .clone();
+
+        set_key(&mut app, KeyCode::KeyD, true);
+        app.update();
+
+        let mut query = app
+            .world_mut()
+            .query_filtered::<(&AnimationClip, &Sprite), With<Player>>();
+        let (clip, sprite) = query.single(app.world()).unwrap();
+        assert_eq!(*clip, WALK_CLIP);
+        assert_eq!(clip.first, 0);
+        assert_eq!(clip.last, 4);
+        assert_eq!(sprite.image, idle_image);
+
+        set_key(&mut app, KeyCode::KeyD, false);
+        app.update();
+
+        let (clip, sprite) = query.single(app.world()).unwrap();
+        assert_eq!(*clip, FALLBACK_CLIP);
+        assert_eq!(sprite.image, idle_image);
+    }
+
+    #[test]
+    fn attack_uses_the_fifteen_frame_attack_sheet_once() {
+        let mut app = test_app();
+        tap_attack(&mut app);
+
+        let mut query = app.world_mut().query_filtered::<
+            (&AnimationClip, &Sprite, &PlayerSpriteSheets),
+            With<Player>,
+        >();
+        let (clip, sprite, sheets) = query.single(app.world()).unwrap();
+        assert_eq!(*clip, ATTACK_CLIP);
+        assert_eq!(clip.first, 0);
+        assert_eq!(clip.last, 14);
+        assert!(!clip.repeat);
+        assert_eq!(sprite.image, sheets.attack_image);
+        assert_eq!(
+            sprite.texture_atlas.as_ref().unwrap().layout,
+            sheets.attack_layout
+        );
+    }
 }
 
 fn update_animation(
@@ -564,6 +640,7 @@ fn update_animation(
             &Facing,
             Option<&Attacking>,
             Option<&Blocking>,
+            &PlayerSpriteSheets,
             &mut AnimationClip,
             &mut AnimationTimer,
             &mut Sprite,
@@ -571,22 +648,48 @@ fn update_animation(
         With<Player>,
     >,
 ) {
-    for (velocity, grounded, facing, attacking, blocking, mut clip, mut timer, mut sprite) in
-        &mut query
+    for (
+        velocity,
+        grounded,
+        facing,
+        attacking,
+        blocking,
+        sheets,
+        mut clip,
+        mut timer,
+        mut sprite,
+    ) in &mut query
     {
         sprite.flip_x = facing.0 < 0.0;
 
-        let next = if attacking.is_some() {
-            ATTACK_CLIP
-        } else if blocking.is_some() {
-            BLOCK_CLIP
-        } else if !grounded.0 {
-            AIRBORNE_CLIP
-        } else if velocity.0.x != 0.0 {
-            WALK_CLIP
+        let walking = attacking.is_none()
+            && blocking.is_none()
+            && grounded.0
+            && velocity.0.x != 0.0;
+
+        let (next, image, layout) = if attacking.is_some() {
+            (
+                ATTACK_CLIP,
+                &sheets.attack_image,
+                &sheets.attack_layout,
+            )
+        } else if walking {
+            (WALK_CLIP, &sheets.walk_image, &sheets.walk_layout)
         } else {
-            IDLE_CLIP
+            (FALLBACK_CLIP, &sheets.walk_image, &sheets.walk_layout)
         };
+
+        let layout_changed = sprite
+            .texture_atlas
+            .as_ref()
+            .is_none_or(|atlas| &atlas.layout != layout);
+        if &sprite.image != image || layout_changed {
+            sprite.image = image.clone();
+            sprite.texture_atlas = Some(TextureAtlas {
+                layout: layout.clone(),
+                index: next.first,
+            });
+        }
 
         play(&mut clip, &mut timer, &mut sprite, next);
     }

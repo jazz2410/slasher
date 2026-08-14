@@ -25,8 +25,7 @@ impl AnimationClip {
         Self { first, last, frame_duration, repeat: true }
     }
 
-    /// Play `first` through `last` once, then hold the final frame. Suits a
-    /// pose that is entered and then sustained, like raising a shield.
+    /// Play `first` through `last` once, then hold the final frame.
     pub const fn once(first: usize, last: usize, frame_duration: f32) -> Self {
         Self { first, last, frame_duration, repeat: false }
     }
@@ -88,6 +87,7 @@ mod tests {
             AnimationClip::still(0),
             AnimationClip::still(2),
             AnimationClip::new(0, 5, 0.09),
+            AnimationClip::once(0, 14, 0.02),
         ];
 
         for &target in &clips {
