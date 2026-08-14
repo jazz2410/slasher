@@ -1,181 +1,33 @@
-//! The spartan: input, simple platformer physics, and animation state.
+//! The player spartan — keyboard and mouse translated into [`Intent`].
 
 use bevy::prelude::*;
 
-use crate::animation::{play, AnimationClip, AnimationTimer};
-use crate::world::GROUND_Y;
+use crate::character::{spawn_character, Attacking, CharacterSet, Facing, Intent, Kinds};
 
-/// `spartan_walk.png` contains the first five poses from `spartan_walking.png`,
-/// normalized into 108x64 cells by `tools/process_walking_sprite.py`.
-const FRAME_SIZE: UVec2 = UVec2::new(108, 64);
-const WALK_FRAME_COLUMNS: u32 = 5;
-const ATTACK_FRAME_COLUMNS: u32 = 5;
-const ATTACK_FRAME_ROWS: u32 = 3;
-
-/// Distance from the sprite's centre down to the character's feet. Every frame
-/// is baselined 2px above the cell bottom.
-const HALF_HEIGHT: f32 = 30.0;
-
-const RUN_SPEED: f32 = 160.0;
-const JUMP_SPEED: f32 = 420.0;
-const GRAVITY: f32 = -1200.0;
-/// Cutting upward velocity when the jump key is released gives short hops.
-const JUMP_CUT_MULTIPLIER: f32 = 0.45;
-
-/// Wind-up before the spear commits — long enough to read, short enough to
-/// still feel responsive.
-const ATTACK_STARTUP: f32 = 0.09;
-/// The window where the hitbox exists and can deal damage.
-const ATTACK_ACTIVE: f32 = 0.10;
-/// Tail where you are committed and cannot act. This is what makes a whiffed
-/// thrust cost something.
-const ATTACK_RECOVERY: f32 = 0.13;
-const ATTACK_DURATION: f32 = ATTACK_STARTUP + ATTACK_ACTIVE + ATTACK_RECOVERY;
-/// Modest forward drive so the thrust travels instead of rooting in place.
-const ATTACK_LUNGE_SPEED: f32 = 90.0;
-
-/// Reach matched to the fully extended frames in `spartan_attack_game.png`.
-const HITBOX_SIZE: Vec2 = Vec2::new(40.0, 16.0);
-const HITBOX_FORWARD_OFFSET: f32 = 30.0;
-const HITBOX_VERTICAL_OFFSET: f32 = -10.0;
-
-const WALK_CLIP: AnimationClip = AnimationClip::new(0, 4, 0.09);
-/// All fifteen attack frames run once over the same clock as its hitbox phases.
-const ATTACK_CLIP: AnimationClip =
-    AnimationClip::once(0, 14, ATTACK_DURATION / 15.0);
-/// Until their dedicated PNG files arrive, other non-walking actions hold a
-/// neutral pose from the walking sheet.
-const FALLBACK_CLIP: AnimationClip = AnimationClip::still(0);
+const START_X: f32 = -140.0;
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_player).add_systems(
-            Update,
-            (
-                read_input,
-                update_block,
-                start_attack,
-                tick_attack,
-                apply_physics,
-                update_animation,
-            )
-                .chain(),
-        );
+        app.add_systems(Startup, spawn_player)
+            .add_systems(Update, read_input.before(CharacterSet::Control));
     }
 }
 
 #[derive(Component)]
 pub struct Player;
 
-#[derive(Component, Default)]
-pub struct Velocity(pub Vec2);
-
-#[derive(Component, Default)]
-pub struct Grounded(pub bool);
-
-/// Which way the spartan faces: `1.0` right, `-1.0` left. Stored explicitly
-/// rather than read back off `Sprite::flip_x` so an attack can aim correctly
-/// even when started from a standstill.
-#[derive(Component)]
-pub struct Facing(pub f32);
-
-/// What the input system decided this frame; physics and animation both read it.
-#[derive(Component, Default)]
-pub struct Intent {
-    direction: f32,
-    jump_pressed: bool,
-    jump_held: bool,
-    attack_pressed: bool,
-    block_held: bool,
-}
-
-/// Present only while a thrust is in progress. Its own clock drives the phases,
-/// so the attack behaves identically with or without finished art.
-#[derive(Component)]
-pub struct Attacking {
-    elapsed: f32,
-    hitbox: Option<Entity>,
-}
-
-impl Attacking {
-    /// The damaging window.
-    fn is_active(&self) -> bool {
-        self.elapsed >= ATTACK_STARTUP && self.elapsed < ATTACK_STARTUP + ATTACK_ACTIVE
-    }
-
-    /// Startup and active combined — the spear is driving forward.
-    fn is_driving(&self) -> bool {
-        self.elapsed < ATTACK_STARTUP + ATTACK_ACTIVE
-    }
-}
-
-/// Present while the shield is up. Held rather than timed, unlike `Attacking`.
-#[derive(Component)]
-pub struct Blocking;
-
-/// Marks the damaging region of a thrust. Enemies will query for this once they
-/// exist; for now it is drawn translucent so the reach is visible.
-#[derive(Component)]
-pub struct AttackHitbox;
-
-/// Action-specific image and atlas handles. New animations can be added here
-/// without combining unrelated actions into one source sheet.
-#[derive(Component)]
-struct PlayerSpriteSheets {
-    walk_image: Handle<Image>,
-    walk_layout: Handle<TextureAtlasLayout>,
-    attack_image: Handle<Image>,
-    attack_layout: Handle<TextureAtlasLayout>,
-}
-
-fn spawn_player(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
-) {
-    let walk_layout = layouts.add(TextureAtlasLayout::from_grid(
-        FRAME_SIZE,
-        WALK_FRAME_COLUMNS,
-        1,
-        None,
-        None,
-    ));
-    let attack_layout = layouts.add(TextureAtlasLayout::from_grid(
-        FRAME_SIZE,
-        ATTACK_FRAME_COLUMNS,
-        ATTACK_FRAME_ROWS,
-        None,
-        None,
-    ));
-    let walk_image = asset_server.load("sprites/spartan_walk.png");
-    let attack_image = asset_server.load("sprites/spartan_attack_game.png");
-
-    commands.spawn((
-        Name::new("Player"),
-        Player,
-        Sprite::from_atlas_image(
-            walk_image.clone(),
-            TextureAtlas {
-                layout: walk_layout.clone(),
-                index: 0,
-            },
-        ),
-        Transform::from_xyz(0.0, GROUND_Y + HALF_HEIGHT, 10.0),
-        Velocity::default(),
-        Grounded(true),
-        Facing(1.0),
-        Intent::default(),
-        FALLBACK_CLIP,
-        AnimationTimer::from_clip(&WALK_CLIP),
-        PlayerSpriteSheets {
-            walk_image,
-            walk_layout,
-            attack_image,
-            attack_layout,
-        },
-    ));
+fn spawn_player(mut commands: Commands, kinds: Res<Kinds>) {
+    let player = spawn_character(
+        &mut commands,
+        &kinds.spartan,
+        "Player",
+        START_X,
+        1.0,
+        Color::WHITE,
+    );
+    commands.entity(player).insert(Player);
 }
 
 fn read_input(
@@ -204,138 +56,17 @@ fn read_input(
     }
 }
 
-/// The shield tracks the key directly: raise it when held, drop it the moment
-/// it is released. Only from a grounded, non-attacking stance — you cannot
-/// abandon a thrust halfway through by guarding.
-fn update_block(
-    mut commands: Commands,
-    query: Query<
-        (Entity, &Intent, &Grounded, Option<&Attacking>, Option<&Blocking>),
-        With<Player>,
-    >,
-) {
-    for (entity, intent, grounded, attacking, blocking) in &query {
-        let wants_guard = intent.block_held && grounded.0 && attacking.is_none();
-        match (wants_guard, blocking.is_some()) {
-            (true, false) => {
-                commands.entity(entity).insert(Blocking);
-            }
-            (false, true) => {
-                commands.entity(entity).remove::<Blocking>();
-            }
-            _ => {}
-        }
-    }
-}
-
-fn start_attack(
-    mut commands: Commands,
-    query: Query<(Entity, &Intent), (With<Player>, Without<Attacking>, Without<Blocking>)>,
-) {
-    for (entity, intent) in &query {
-        if intent.attack_pressed {
-            commands.entity(entity).insert(Attacking {
-                elapsed: 0.0,
-                hitbox: None,
-            });
-        }
-    }
-}
-
-fn tick_attack(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut query: Query<(Entity, &mut Attacking, &Facing), With<Player>>,
-) {
-    for (entity, mut attack, facing) in &mut query {
-        attack.elapsed += time.delta_secs();
-
-        match (attack.is_active(), attack.hitbox) {
-            (true, None) => {
-                let hitbox = commands
-                    .spawn((
-                        Name::new("Attack Hitbox"),
-                        AttackHitbox,
-                        Sprite::from_color(Color::srgba(1.0, 0.25, 0.25, 0.35), HITBOX_SIZE),
-                        Transform::from_xyz(
-                            facing.0 * HITBOX_FORWARD_OFFSET,
-                            HITBOX_VERTICAL_OFFSET,
-                            1.0,
-                        ),
-                        ChildOf(entity),
-                    ))
-                    .id();
-                attack.hitbox = Some(hitbox);
-            }
-            (false, Some(hitbox)) => {
-                commands.entity(hitbox).despawn();
-                attack.hitbox = None;
-            }
-            _ => {}
-        }
-
-        if attack.elapsed >= ATTACK_DURATION {
-            commands.entity(entity).remove::<Attacking>();
-        }
-    }
-}
-
-fn apply_physics(
-    time: Res<Time>,
-    mut query: Query<
-        (
-            &Intent,
-            &Facing,
-            Option<&Attacking>,
-            Option<&Blocking>,
-            &mut Velocity,
-            &mut Grounded,
-            &mut Transform,
-        ),
-        With<Player>,
-    >,
-) {
-    let dt = time.delta_secs();
-
-    for (intent, facing, attacking, blocking, mut velocity, mut grounded, mut transform) in
-        &mut query
-    {
-        // Committing to a thrust takes over horizontal control: drive forward
-        // through the strike, then plant for the recovery.
-        velocity.0.x = match attacking {
-            Some(attack) if attack.is_driving() => facing.0 * ATTACK_LUNGE_SPEED,
-            Some(_) => 0.0,
-            // Planting the shield roots you. Turning is still allowed, so you
-            // can face an attacker without giving up the guard.
-            None if blocking.is_some() => 0.0,
-            None => intent.direction * RUN_SPEED,
-        };
-
-        if intent.jump_pressed && grounded.0 && attacking.is_none() && blocking.is_none() {
-            velocity.0.y = JUMP_SPEED;
-            grounded.0 = false;
-        }
-
-        // Variable jump height: releasing early clips the rest of the ascent.
-        if !intent.jump_held && velocity.0.y > 0.0 {
-            velocity.0.y *= JUMP_CUT_MULTIPLIER;
-        }
-
-        velocity.0.y += GRAVITY * dt;
-        transform.translation += velocity.0.extend(0.0) * dt;
-
-        let floor = GROUND_Y + HALF_HEIGHT;
-        if transform.translation.y <= floor {
-            transform.translation.y = floor;
-            velocity.0.y = 0.0;
-            grounded.0 = true;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::character::{
+        Blocking, CharacterPlugin, Reach, SPARTAN_BODY, SPARTAN_HURTBOX, SPARTAN_STATS,
+    };
+
+    /// The spartan's own numbers, so the tests move with the blueprint.
+    const ATTACK_DURATION: f32 = SPARTAN_STATS.attack.total();
+    use crate::combat::{CombatPlugin, Hurt};
+    use crate::enemy::EnemyPlugin;
     use bevy::time::TimeUpdateStrategy;
     use std::time::Duration;
 
@@ -352,24 +83,67 @@ mod tests {
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
                 DT,
             )))
-            .add_plugins(PlayerPlugin);
-        app.update(); // runs Startup, spawning the player
+            .add_plugins((CharacterPlugin, CombatPlugin, PlayerPlugin));
+        app.update();
+        app
+    }
+
+    /// The full game, so the enemy exists and can be struck.
+    fn duel_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<Image>()
+            .init_asset::<TextureAtlasLayout>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+                DT,
+            )))
+            .add_plugins((CharacterPlugin, CombatPlugin, PlayerPlugin, EnemyPlugin));
+        app.update();
         app
     }
 
     fn hitbox_count(app: &mut App) -> usize {
         app.world_mut()
-            .query_filtered::<Entity, With<AttackHitbox>>()
+            .query_filtered::<Entity, With<crate::combat::AttackHitbox>>()
             .iter(app.world())
             .count()
     }
 
     fn is_attacking(app: &mut App) -> bool {
         app.world_mut()
-            .query_filtered::<Entity, With<Attacking>>()
+            .query_filtered::<Entity, (With<Attacking>, With<Player>)>()
             .iter(app.world())
             .next()
             .is_some()
+    }
+
+    fn is_blocking(app: &mut App) -> bool {
+        app.world_mut()
+            .query_filtered::<Entity, (With<Blocking>, With<Player>)>()
+            .iter(app.world())
+            .next()
+            .is_some()
+    }
+
+    fn player_x(app: &mut App) -> f32 {
+        app.world_mut()
+            .query_filtered::<&Transform, With<Player>>()
+            .single(app.world())
+            .unwrap()
+            .translation
+            .x
+    }
+
+    fn set_key(app: &mut App, key: KeyCode, down: bool) {
+        let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        if down {
+            input.press(key);
+        } else {
+            input.release(key);
+        }
     }
 
     /// One discrete press-and-release, costing one frame.
@@ -390,7 +164,7 @@ mod tests {
     #[test]
     fn attack_runs_through_its_phases_and_ends() {
         let mut app = test_app();
-        assert!(!is_attacking(&mut app), "should not start out attacking");
+        assert!(!is_attacking(&mut app));
 
         tap_attack(&mut app);
         assert!(is_attacking(&mut app), "tapping J starts a thrust");
@@ -398,29 +172,27 @@ mod tests {
         let mut elapsed = DT;
         let mut hitbox_seen = false;
 
-        // Step well past the full duration and check the window is respected.
         while elapsed < ATTACK_DURATION * 2.0 {
             let count = hitbox_count(&mut app);
             assert!(count <= 1, "at most one hitbox at a time, saw {count}");
-
             if count == 1 {
                 hitbox_seen = true;
                 assert!(
-                    elapsed >= ATTACK_STARTUP,
-                    "hitbox live at {elapsed}s, before startup ends at {ATTACK_STARTUP}s"
+                    elapsed >= SPARTAN_STATS.attack.startup,
+                    "hitbox live at {elapsed}s, before startup ends"
                 );
                 assert!(
-                    elapsed < ATTACK_STARTUP + ATTACK_ACTIVE + DT,
+                    elapsed
+                        < SPARTAN_STATS.attack.startup + SPARTAN_STATS.attack.active + DT,
                     "hitbox still live at {elapsed}s, past the active window"
                 );
             }
-
             app.update();
             elapsed += DT;
         }
 
         assert!(hitbox_seen, "the active window never produced a hitbox");
-        assert!(!is_attacking(&mut app), "attack should have ended by now");
+        assert!(!is_attacking(&mut app), "attack should have ended");
         assert_eq!(hitbox_count(&mut app), 0, "hitbox outlived the attack");
     }
 
@@ -428,9 +200,6 @@ mod tests {
     fn attack_cannot_be_retriggered_mid_swing() {
         let mut app = test_app();
 
-        // One tap to start, then mash during startup. Each `tap_attack` is also
-        // one frame, so track the frame count to measure against the original
-        // attack clock rather than the last button press.
         tap_attack(&mut app);
         for _ in 0..4 {
             tap_attack(&mut app);
@@ -438,8 +207,6 @@ mod tests {
         let mut frames = 5;
         assert!(is_attacking(&mut app), "still mid-thrust after mashing");
 
-        // Run to just past when a single, un-restarted thrust must have ended.
-        // If mashing reset the clock, the attack outlives this deadline.
         let deadline = (ATTACK_DURATION / DT).ceil() as usize + 1;
         while frames < deadline {
             app.update();
@@ -452,32 +219,6 @@ mod tests {
         );
     }
 
-    fn set_key(app: &mut App, key: KeyCode, down: bool) {
-        let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-        if down {
-            input.press(key);
-        } else {
-            input.release(key);
-        }
-    }
-
-    fn is_blocking(app: &mut App) -> bool {
-        app.world_mut()
-            .query_filtered::<Entity, With<Blocking>>()
-            .iter(app.world())
-            .next()
-            .is_some()
-    }
-
-    fn player_x(app: &mut App) -> f32 {
-        app.world_mut()
-            .query_filtered::<&Transform, With<Player>>()
-            .single(app.world())
-            .unwrap()
-            .translation
-            .x
-    }
-
     #[test]
     fn shield_tracks_the_key() {
         let mut app = test_app();
@@ -487,7 +228,6 @@ mod tests {
         app.update();
         assert!(is_blocking(&mut app), "holding K raises the shield");
 
-        // Still up while held.
         app.update();
         assert!(is_blocking(&mut app));
 
@@ -509,7 +249,6 @@ mod tests {
             "guard should refuse the thrust while the shield is up"
         );
 
-        // Dropping the shield frees the attack again.
         set_key(&mut app, KeyCode::KeyK, false);
         app.update();
         tap_attack(&mut app);
@@ -520,8 +259,6 @@ mod tests {
     fn blocking_roots_movement() {
         let mut app = test_app();
 
-        // Confirm the movement key does move him first, so the assertion below
-        // is about the guard rather than about input not working.
         set_key(&mut app, KeyCode::KeyD, true);
         let before_walk = player_x(&mut app);
         for _ in 0..5 {
@@ -546,151 +283,245 @@ mod tests {
     fn facing_locks_while_attacking() {
         let mut app = test_app();
 
-        // Face left, then attack and try to turn around mid-thrust.
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::KeyA);
+        set_key(&mut app, KeyCode::KeyA, true);
         app.update();
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .release(KeyCode::KeyA);
+        set_key(&mut app, KeyCode::KeyA, false);
 
-        let facing_before = app
+        let before = app
             .world_mut()
             .query_filtered::<&Facing, With<Player>>()
             .single(app.world())
             .unwrap()
             .0;
-        assert_eq!(facing_before, -1.0, "holding A should face left");
+        assert_eq!(before, -1.0, "holding A should face left");
 
         tap_attack(&mut app);
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::KeyD);
-        app.update();
-
-        let facing_during = app
-            .world_mut()
-            .query_filtered::<&Facing, With<Player>>()
-            .single(app.world())
-            .unwrap()
-            .0;
-        assert_eq!(facing_during, -1.0, "facing must not flip mid-thrust");
-    }
-
-    #[test]
-    fn walking_uses_the_five_frame_walk_cycle() {
-        let mut app = test_app();
-
-        let idle_image = app
-            .world_mut()
-            .query_filtered::<&Sprite, With<Player>>()
-            .single(app.world())
-            .unwrap()
-            .image
-            .clone();
-
         set_key(&mut app, KeyCode::KeyD, true);
         app.update();
 
-        let mut query = app
+        let during = app
             .world_mut()
-            .query_filtered::<(&AnimationClip, &Sprite), With<Player>>();
-        let (clip, sprite) = query.single(app.world()).unwrap();
-        assert_eq!(*clip, WALK_CLIP);
-        assert_eq!(clip.first, 0);
-        assert_eq!(clip.last, 4);
-        assert_eq!(sprite.image, idle_image);
+            .query_filtered::<&Facing, With<Player>>()
+            .single(app.world())
+            .unwrap()
+            .0;
+        assert_eq!(during, -1.0, "facing must not flip mid-thrust");
+    }
 
-        set_key(&mut app, KeyCode::KeyD, false);
-        app.update();
+    // ---- combat ----
 
-        let (clip, sprite) = query.single(app.world()).unwrap();
-        assert_eq!(*clip, FALLBACK_CLIP);
-        assert_eq!(sprite.image, idle_image);
+    fn hurt_of<T: Component>(app: &mut App) -> Option<bool> {
+        app.world_mut()
+            .query_filtered::<&Hurt, With<T>>()
+            .iter(app.world())
+            .next()
+            .map(|h| h.blocked)
+    }
+
+    #[derive(Component)]
+    struct Dummy;
+
+    fn x_of<T: Component>(app: &mut App) -> f32 {
+        app.world_mut()
+            .query_filtered::<&Transform, With<T>>()
+            .single(app.world())
+            .unwrap()
+            .translation
+            .x
+    }
+
+    /// A stationary target, so reach is measured against the spear rather than
+    /// against however far the enemy happened to walk mid-thrust.
+    fn spawn_dummy(app: &mut App, x: f32) -> Entity {
+        app.world_mut()
+            .spawn((
+                Dummy,
+                crate::character::Character,
+                Transform::from_xyz(x, crate::world::GROUND_Y + SPARTAN_BODY.half_height, 10.0),
+                crate::character::Velocity::default(),
+                crate::character::Grounded(true),
+                Facing(-1.0),
+                crate::character::BaseTint(Color::WHITE),
+                crate::combat::Hurtbox(SPARTAN_HURTBOX),
+                Intent::default(),
+                // Without these `apply_physics` skips the dummy entirely, and
+                // its knockback would never decay.
+                SPARTAN_STATS,
+                SPARTAN_BODY,
+            ))
+            .id()
+    }
+
+    /// Thrust from inside spear range; the target should flinch.
+    #[test]
+    fn thrust_reaches_a_target_in_front() {
+        let mut app = test_app();
+        let ahead = x_of::<Player>(&mut app) + 35.0;
+        spawn_dummy(&mut app, ahead);
+        tap_attack(&mut app);
+
+        let mut struck = false;
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 2 {
+            if hurt_of::<Dummy>(&mut app).is_some() {
+                struck = true;
+                break;
+            }
+            app.update();
+        }
+        assert!(struck, "a thrust at 35px never reached the target");
     }
 
     #[test]
-    fn attack_uses_the_fifteen_frame_attack_sheet_once() {
+    fn thrust_falls_short_of_a_distant_target() {
+        let mut app = test_app();
+        let far = x_of::<Player>(&mut app) + 120.0;
+        spawn_dummy(&mut app, far);
+        tap_attack(&mut app);
+
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 2 {
+            assert!(
+                hurt_of::<Dummy>(&mut app).is_none(),
+                "a thrust at 120px should fall well short"
+            );
+            app.update();
+        }
+    }
+
+    fn velocity_x(app: &App, entity: Entity) -> f32 {
+        app.world()
+            .get::<crate::character::Velocity>(entity)
+            .unwrap()
+            .0
+            .x
+    }
+
+    /// The active window spans several frames, so the hitbox has to remember
+    /// who it already hit. Knockback is the observable: a second hit would
+    /// slam the velocity back up to full instead of letting it decay.
+    #[test]
+    fn a_thrust_strikes_a_target_only_once() {
+        let mut app = test_app();
+        let ahead = x_of::<Player>(&mut app) + 35.0;
+        let dummy = spawn_dummy(&mut app, ahead);
+        tap_attack(&mut app);
+
+        let mut knockback = Vec::new();
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 2 {
+            app.update();
+            if hurt_of::<Dummy>(&mut app).is_some() {
+                knockback.push(velocity_x(&app, dummy));
+            }
+        }
+
+        assert!(knockback.len() >= 3, "never struck: {knockback:?}");
+        for pair in knockback.windows(2) {
+            // Strictly decaying, not merely non-increasing: a hit landing
+            // every frame would re-set the velocity to a constant, which a
+            // `<=` check would happily accept.
+            assert!(
+                pair[1] < pair[0] - 0.5,
+                "knockback stopped decaying ({knockback:?}) — the thrust hit more than once"
+            );
+        }
+    }
+
+    /// The point of the blueprint refactor: a fighter's reach travels on the
+    /// entity, so a longer-speared enemy can exist beside a spartan. Before it,
+    /// reach was a module constant and this was impossible to express.
+    #[test]
+    fn reach_belongs_to_the_fighter_not_the_module() {
+        // Comfortably past a spartan's spear *plus* the ~17px his lunge
+        // carries him during the active window.
+        let far = 100.0;
+
+        // With the spartan's own reach, this distance is out of range.
+        let mut app = test_app();
+        let x = x_of::<Player>(&mut app) + far;
+        spawn_dummy(&mut app, x);
+        tap_attack(&mut app);
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 2 {
+            assert!(
+                hurt_of::<Dummy>(&mut app).is_none(),
+                "{far}px should be beyond a spartan's spear"
+            );
+            app.update();
+        }
+
+        // Hand the same fighter a longer weapon and it lands, with no change to
+        // any system.
+        let mut app = test_app();
+        let x = x_of::<Player>(&mut app) + far;
+        spawn_dummy(&mut app, x);
+        let player = app
+            .world_mut()
+            .query_filtered::<Entity, With<Player>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().entity_mut(player).insert(Reach {
+            size: Vec2::new(80.0, 14.0),
+            forward: 60.0,
+            vertical: -2.0,
+        });
+
+        tap_attack(&mut app);
+        let mut struck = false;
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 2 {
+            if hurt_of::<Dummy>(&mut app).is_some() {
+                struck = true;
+                break;
+            }
+            app.update();
+        }
+        assert!(struck, "a longer reach should have covered {far}px");
+    }
+
+    #[test]
+    fn a_thrust_does_not_wound_its_owner() {
         let mut app = test_app();
         tap_attack(&mut app);
 
-        let mut query = app.world_mut().query_filtered::<
-            (&AnimationClip, &Sprite, &PlayerSpriteSheets),
-            With<Player>,
-        >();
-        let (clip, sprite, sheets) = query.single(app.world()).unwrap();
-        assert_eq!(*clip, ATTACK_CLIP);
-        assert_eq!(clip.first, 0);
-        assert_eq!(clip.last, 14);
-        assert!(!clip.repeat);
-        assert_eq!(sprite.image, sheets.attack_image);
-        assert_eq!(
-            sprite.texture_atlas.as_ref().unwrap().layout,
-            sheets.attack_layout
-        );
-    }
-}
-
-fn update_animation(
-    mut query: Query<
-        (
-            &Velocity,
-            &Grounded,
-            &Facing,
-            Option<&Attacking>,
-            Option<&Blocking>,
-            &PlayerSpriteSheets,
-            &mut AnimationClip,
-            &mut AnimationTimer,
-            &mut Sprite,
-        ),
-        With<Player>,
-    >,
-) {
-    for (
-        velocity,
-        grounded,
-        facing,
-        attacking,
-        blocking,
-        sheets,
-        mut clip,
-        mut timer,
-        mut sprite,
-    ) in &mut query
-    {
-        sprite.flip_x = facing.0 < 0.0;
-
-        let walking = attacking.is_none()
-            && blocking.is_none()
-            && grounded.0
-            && velocity.0.x != 0.0;
-
-        let (next, image, layout) = if attacking.is_some() {
-            (
-                ATTACK_CLIP,
-                &sheets.attack_image,
-                &sheets.attack_layout,
-            )
-        } else if walking {
-            (WALK_CLIP, &sheets.walk_image, &sheets.walk_layout)
-        } else {
-            (FALLBACK_CLIP, &sheets.walk_image, &sheets.walk_layout)
-        };
-
-        let layout_changed = sprite
-            .texture_atlas
-            .as_ref()
-            .is_none_or(|atlas| &atlas.layout != layout);
-        if &sprite.image != image || layout_changed {
-            sprite.image = image.clone();
-            sprite.texture_atlas = Some(TextureAtlas {
-                layout: layout.clone(),
-                index: next.first,
-            });
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 2 {
+            assert!(
+                hurt_of::<Player>(&mut app).is_none(),
+                "the spartan speared himself"
+            );
+            app.update();
         }
+    }
 
-        play(&mut clip, &mut timer, &mut sprite, next);
+    /// The enemy closes and attacks on his own, so the player takes a hit.
+    #[test]
+    fn the_enemy_can_hurt_the_player() {
+        let mut app = duel_app();
+        let mut struck = false;
+        for _ in 0..300 {
+            app.update();
+            if hurt_of::<Player>(&mut app).is_some() {
+                struck = true;
+                break;
+            }
+        }
+        assert!(struck, "the enemy never landed a hit on the player");
+    }
+
+    /// Guarding into the enemy's thrust should spark, not wound.
+    #[test]
+    fn guarding_turns_the_hit_aside() {
+        let mut app = duel_app();
+        set_key(&mut app, KeyCode::KeyK, true);
+
+        let mut outcome = None;
+        for _ in 0..300 {
+            app.update();
+            if let Some(blocked) = hurt_of::<Player>(&mut app) {
+                outcome = Some(blocked);
+                break;
+            }
+        }
+        assert_eq!(
+            outcome,
+            Some(true),
+            "a hit taken behind a raised shield should register as blocked"
+        );
     }
 }

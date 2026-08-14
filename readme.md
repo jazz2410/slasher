@@ -28,12 +28,44 @@ The block is a *held* state rather than a timed one: it remains active while the
 key is down and drops the instant it is released. It roots you in place and
 locks out attacking and jumping, but you can still turn to face an attacker.
 
+## Combat
+
+Fighters are reused along two axes.
+
+**Behaviour**: the player and the enemy are the same creature.
+[src/character.rs](src/character.rs) owns physics, the attack/block state
+machine, and animation; the two differ only in who fills `Intent` each frame — a
+keyboard for one, a few AI rules for the other. A new enemy *behaviour* is one
+system writing `Intent`.
+
+**Data**: a kind of fighter is a `CharacterKind` blueprint — spritesheet, clips,
+reach, hurtbox, body, stats. Spawning copies it onto the entity as components,
+so two fighters with different art, different spear lengths and different attack
+timings coexist without touching a system. A new enemy *kind* is one more entry
+in `Kinds`.
+
+The enemy is tinted cold to tell the two apart.
+
+There is no health and no bar. A hit reads purely through the reaction:
+
+| Outcome | Feedback |
+| --- | --- |
+| Clean hit | Red flash, hard knockback, 0.34s of hitstun |
+| Guarded hit | Gold flash, light shove, 0.16s |
+
+The shield only covers the side you face, so turning your back means eating the
+thrust. One thrust can strike a given target only once, however many frames its
+active window spans.
+
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | [src/main.rs](src/main.rs) | App setup, window config, plugin registration |
-| [src/player.rs](src/player.rs) | Input, platformer physics, animation state |
+| [src/character.rs](src/character.rs) | Shared body: physics, attack/block state, animation |
+| [src/player.rs](src/player.rs) | Keyboard and mouse into `Intent` |
+| [src/enemy.rs](src/enemy.rs) | AI into `Intent` |
+| [src/combat.rs](src/combat.rs) | Hit resolution, knockback, damage flash |
 | [src/animation.rs](src/animation.rs) | Reusable spritesheet animation driver |
 | [src/camera.rs](src/camera.rs) | Follow camera with fixed vertical framing |
 | [src/world.rs](src/world.rs) | Placeholder ground and pillars |
@@ -43,30 +75,32 @@ module's `build` rather than touching `main.rs`.
 
 ## Sprites
 
-Each action has its own PNG rather than sharing one large combat sheet:
+The game loads `assets/sprites/spartan_combat.png` — a 540x256 atlas, 5x4 cells
+of 108x64. Row 0 is the walk cycle (atlas indices 0-4); rows 1-3 are one
+continuous 15-frame spear thrust (5-19). Frame constants live at the top of
+[src/character.rs](src/character.rs).
 
-- `spartan_walk.png` is a generated 540x64 atlas containing five 108x64 frames
-  from the first row of `spartan_walking.png`.
-- `spartan_attack_game.png` is a generated 540x192 atlas containing all fifteen
-  108x64 frames from `spartan_attack.png`. It plays once over the attack's
-  startup, active, and recovery timeline.
-
-The processing scripts crop the poses, normalize their scale and anchor,
-preserve transparency, and quantise downsampling noise. Re-run them after
-editing either source:
+That atlas is **generated**. `tools/build_sheet.py` stacks the already-gridded
+source sheets into it, checking they agree on cell size and that every frame is
+baselined identically — a drift between sheets shows up in game as the character
+popping when the animation changes. Re-run it after replacing either sheet:
 
 ```sh
-python3 tools/process_walking_sprite.py
-python3 tools/process_attack_sprite.py
+python3 tools/build_sheet.py
 ```
 
-Frames are horizontally anchored on the body rather than alternating feet, so
-the torso stays steady through the walk cycle. Every frame shares a feet
-baseline, and the script rejects any frame that clips its cell.
+| Source | Contributes |
+| --- | --- |
+| `spartan_walk.png` | row 0, indices 0-4 |
+| `spartan_attack_game.png` | rows 1-3, indices 5-19 |
 
-Block, idle, and airborne keep their gameplay behavior but temporarily hold the
-first walking pose. Each will switch to its own processed PNG when that source
-art is added.
+`tools/process_sprite.py` is the older, heavier tool: it rescues art off an
+opaque backdrop with no usable grid, keying out the background and re-anchoring
+each frame. Use it only when a source is not already game-ready.
+
+**There is currently no block animation.** `BLOCK_CLIP` borrows the thrust's
+opening frame as a stand-in; blocking works mechanically, but it looks like a
+wind-up rather than a guard.
 
 The world uses **1 unit = 1 source pixel**, and the camera is set to a fixed
 360-unit viewport height, so the game letterboxes consistently at any window

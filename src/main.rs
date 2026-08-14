@@ -1,5 +1,8 @@
 mod animation;
 mod camera;
+mod character;
+mod combat;
+mod enemy;
 mod player;
 mod world;
 
@@ -23,7 +26,10 @@ fn main() {
         .add_plugins((
             camera::CameraPlugin,
             world::WorldPlugin,
+            character::CharacterPlugin,
+            combat::CombatPlugin,
             player::PlayerPlugin,
+            enemy::EnemyPlugin,
             animation::AnimationPlugin,
         ))
         .run();

@@ -25,7 +25,13 @@ impl AnimationClip {
         Self { first, last, frame_duration, repeat: true }
     }
 
-    /// Play `first` through `last` once, then hold the final frame.
+    /// Play `first` through `last` once, then hold the final frame. Suits a
+    /// pose that is entered and then sustained, like raising a shield.
+    ///
+    /// Unused by the game at present only because the current art has no block
+    /// row, so `Clips::block` is a single stand-in frame. Restore a real guard
+    /// animation and this is what plays it.
+    #[allow(dead_code)]
     pub const fn once(first: usize, last: usize, frame_duration: f32) -> Self {
         Self { first, last, frame_duration, repeat: false }
     }
