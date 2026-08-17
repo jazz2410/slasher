@@ -3,6 +3,7 @@ mod camera;
 mod character;
 mod combat;
 mod enemy;
+mod level;
 mod player;
 mod world;
 
@@ -26,6 +27,7 @@ fn main() {
         .add_plugins((
             camera::CameraPlugin,
             world::WorldPlugin,
+            level::LevelPlugin,
             character::CharacterPlugin,
             combat::CombatPlugin,
             player::PlayerPlugin,

@@ -73,6 +73,50 @@ active window spans.
 Each module is a Bevy `Plugin`, so adding a system means adding it to that
 module's `build` rather than touching `main.rs`.
 
+## Levels
+
+Levels are authored in [LDtk](https://ldtk.io) (free desktop editor, 1.5.3).
+The game loads the first `.ldtk` in `assets/levels`, and finds its layers by
+**type**, not by name — so call them whatever you like:
+
+| Layer type | Purpose |
+| --- | --- |
+| IntGrid | Collision. `1` Solid, `2` Platform (one-way), `3` Hazard |
+| Tiles / AutoLayer | The art. Drawn exactly as painted. |
+| Entities | `PlayerSpawn`, `Enemy`, `LevelExit`, `Torch` |
+
+A level with no painted tiles falls back to deriving terrain from its collision,
+so blocked-out geometry is visible before any art is placed. A level with no
+`PlayerSpawn` puts the player on the first bit of ground it can find.
+
+Paint collision first and let auto-rules derive the terrain art: you draw the
+level's *shape* and the tiles follow.
+
+[src/level.rs](src/level.rs) reads the project directly with `serde_json` rather
+than pulling in a tilemap crate — LDtk bakes its *resolved* tile placements into
+the saved file, so there is nothing left for such a crate to compute. It builds
+a collision grid from the `Collision` IntGrid and spawn points from the
+`Entities` layer, and draws the tiles.
+
+Collision is axis-separated: move and resolve horizontally, then vertically.
+Doing both at once cannot tell a wall from a floor. With no level loaded — which
+is how the tests run — characters fall back to flat ground at `GROUND_Y`.
+
+`tools/blockout.py` writes a level's geometry from an ASCII map, which beats
+clicking for broad strokes. Close LDtk before running it.
+
+`assets/tiles/village.png` is **generated** by `tools/make_tileset.py` from the
+palette — procedural blockout art, not hand-drawn, but every tile sits on the ID
+the spec assigns it, so a drawn sheet can replace the file without touching a
+level. The game picks nine-slice tiles from the collision grid itself, so a level
+renders correctly straight from painted collision with no LDtk rule setup.
+
+The art brief lives in [docs/tileset-spec.md](docs/tileset-spec.md) — a locked
+28-colour palette (`assets/palettes/slasher.gpl`, derived from the spartan so the
+world cannot clash with him), the exact tile inventory with fixed IDs, and the
+lighting approach. `tools/make_ldtk.py` regenerates the project skeleton and
+validates it against LDtk's published JSON schema.
+
 ## Sprites
 
 The game loads `assets/sprites/spartan_combat.png` — a 540x256 atlas, 5x4 cells

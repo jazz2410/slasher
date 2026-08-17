@@ -3,6 +3,8 @@
 use bevy::prelude::*;
 
 use crate::character::{spawn_character, Attacking, CharacterSet, Facing, Intent, Kinds};
+use crate::level::Level;
+use crate::world::GROUND_Y;
 
 const START_X: f32 = -140.0;
 
@@ -18,15 +20,16 @@ impl Plugin for PlayerPlugin {
 #[derive(Component)]
 pub struct Player;
 
-fn spawn_player(mut commands: Commands, kinds: Res<Kinds>) {
-    let player = spawn_character(
-        &mut commands,
-        &kinds.spartan,
-        "Player",
-        START_X,
-        1.0,
-        Color::WHITE,
-    );
+fn spawn_player(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Level>>) {
+    // The level decides where he starts; the constant is only a fallback for
+    // when no level is loaded, which is how the tests run.
+    let feet = match level.as_deref() {
+        // A level with no PlayerSpawn still has ground to stand on.
+        Some(level) => level.spawn("PlayerSpawn").unwrap_or_else(|| level.default_spawn()),
+        None => Vec2::new(START_X, GROUND_Y),
+    };
+
+    let player = spawn_character(&mut commands, &kinds.spartan, "Player", feet, 1.0, Color::WHITE);
     commands.entity(player).insert(Player);
 }
 

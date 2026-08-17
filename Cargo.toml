@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.19"
+# Both are already in Bevy's own tree, so these cost nothing extra to build.
+# The LDtk project is plain JSON and carries its resolved tiles, so a tilemap
+# crate would add a large dependency for something serde does in a few structs.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Bevy is unusably slow when its dependencies are built unoptimized, but we
 # still want fast rebuilds of our own code.

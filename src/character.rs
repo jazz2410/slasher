@@ -12,6 +12,7 @@ use bevy::prelude::*;
 
 use crate::animation::{play, AnimationClip, AnimationTimer};
 use crate::combat::{AttackHitbox, Hurt, Hurtbox};
+use crate::level::Level;
 use crate::world::GROUND_Y;
 
 /// These belong to the level rather than to any fighter.
@@ -47,8 +48,12 @@ pub const SPARTAN_STATS: Stats = Stats {
     },
 };
 
-/// Centre-to-feet: every frame is baselined 2px above the cell bottom.
-pub const SPARTAN_BODY: Body = Body { half_height: 30.0 };
+/// Centre-to-feet: every frame is baselined 2px above the cell bottom. The
+/// collider is narrower than the art so he fits through a one-tile gap.
+pub const SPARTAN_BODY: Body = Body {
+    half_height: 30.0,
+    half_width: 9.0,
+};
 
 /// Measured off the thrust frames: at full extension the spear tip reaches 43px
 /// forward of the sprite's centre and sits roughly level with it.
@@ -136,11 +141,12 @@ pub struct Stats {
     pub attack: AttackTiming,
 }
 
-/// Physical dimensions the ground and the sprite origin depend on.
+/// The collision box, as half-extents from the sprite's centre.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct Body {
     /// Distance from the sprite's centre down to the feet.
     pub half_height: f32,
+    pub half_width: f32,
 }
 
 /// Where a fighter's strike lands, relative to his own centre. The counterpart
@@ -278,7 +284,7 @@ pub fn spawn_character(
     commands: &mut Commands,
     kind: &CharacterKind,
     name: &'static str,
-    x: f32,
+    feet: Vec2,
     facing: f32,
     tint: Color,
 ) -> Entity {
@@ -296,7 +302,7 @@ pub fn spawn_character(
             Name::new(name),
             Character,
             sprite,
-            Transform::from_xyz(x, GROUND_Y + kind.body.half_height, 10.0),
+            Transform::from_xyz(feet.x, feet.y + kind.body.half_height, 10.0),
             Velocity::default(),
             Grounded(true),
             Facing(facing),
@@ -407,6 +413,7 @@ fn tick_attack(
 
 fn apply_physics(
     time: Res<Time>,
+    level: Option<Res<Level>>,
     mut query: Query<
         (
             &Intent,
@@ -464,14 +471,41 @@ fn apply_physics(
         }
 
         velocity.0.y += GRAVITY * dt;
-        transform.translation += velocity.0.extend(0.0) * dt;
 
-        let floor = GROUND_Y + body.half_height;
-        if transform.translation.y <= floor {
-            transform.translation.y = floor;
-            velocity.0.y = 0.0;
-            grounded.0 = true;
+        let half = Vec2::new(body.half_width, body.half_height);
+        let mut centre = transform.translation.truncate();
+        // Where the feet were before moving — a one-way platform only catches a
+        // body that was already above it.
+        let previous_bottom = centre.y - half.y;
+
+        // Axis-separated: move and resolve horizontally, then vertically.
+        // Resolving both at once cannot tell a wall from a floor.
+        centre.x += velocity.0.x * dt;
+        if let Some(level) = level.as_deref() {
+            level.resolve_horizontal(&mut centre, half, &mut velocity.0.x);
         }
+
+        centre.y += velocity.0.y * dt;
+        grounded.0 = match level.as_deref() {
+            Some(level) => {
+                level.resolve_vertical(&mut centre, half, &mut velocity.0.y, previous_bottom)
+            }
+            // No level loaded — flat ground at GROUND_Y, which is what the
+            // tests run against.
+            None => {
+                let floor = GROUND_Y + half.y;
+                if centre.y <= floor {
+                    centre.y = floor;
+                    velocity.0.y = 0.0;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
+        transform.translation.x = centre.x;
+        transform.translation.y = centre.y;
     }
 }
 

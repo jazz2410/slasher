@@ -3,6 +3,8 @@
 
 use bevy::prelude::*;
 
+use crate::level::Level;
+
 /// Y coordinate of the ground surface. Everything that stands on the floor
 /// positions itself relative to this.
 pub const GROUND_Y: f32 = 0.0;
@@ -18,7 +20,12 @@ impl Plugin for WorldPlugin {
     }
 }
 
-fn spawn_ground(mut commands: Commands) {
+fn spawn_ground(mut commands: Commands, level: Option<Res<Level>>) {
+    // A real level supersedes this placeholder entirely.
+    if level.is_some() {
+        return;
+    }
+
     commands.spawn((
         Name::new("Ground"),
         Sprite::from_color(

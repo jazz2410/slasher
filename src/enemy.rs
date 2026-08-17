@@ -4,9 +4,14 @@
 use bevy::prelude::*;
 
 use crate::character::{spawn_character, Attacking, CharacterSet, Facing, Intent, Kinds};
+use crate::level::Level;
 use crate::player::Player;
+use crate::world::GROUND_Y;
 
 const START_X: f32 = 180.0;
+/// Marker names accepted for an enemy placement, so the level can call it
+/// either thing.
+const SPAWN_MARKERS: [&str; 2] = ["EnemySpawn", "Enemy"];
 /// Both spartans share one spritesheet, so the enemy is tinted cold to keep the
 /// two readable at a glance.
 const TINT: Color = Color::srgb(0.55, 0.68, 1.0);
@@ -36,14 +41,33 @@ struct Brain {
     cooldown: Timer,
 }
 
-fn spawn_enemy(mut commands: Commands, kinds: Res<Kinds>) {
-    let enemy = spawn_character(&mut commands, &kinds.spartan, "Enemy", START_X, -1.0, TINT);
-    commands.entity(enemy).insert((
-        Enemy,
-        Brain {
-            cooldown: Timer::from_seconds(ATTACK_COOLDOWN, TimerMode::Once),
-        },
-    ));
+fn spawn_enemy(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Level>>) {
+    // One per Enemy marker in the level, or a single fallback without one.
+    let placements: Vec<Vec2> = match level.as_deref() {
+        Some(level) => SPAWN_MARKERS
+            .iter()
+            .flat_map(|name| level.all_spawns(name))
+            .collect(),
+        None => Vec::new(),
+    };
+    let placements = if !placements.is_empty() {
+        placements
+    } else if let Some(level) = level.as_deref() {
+        // No Enemy markers: put one on the ground a little way in.
+        vec![level.default_spawn() + Vec2::new(120.0, 0.0)]
+    } else {
+        vec![Vec2::new(START_X, GROUND_Y)]
+    };
+
+    for feet in placements {
+        let enemy = spawn_character(&mut commands, &kinds.spartan, "Enemy", feet, -1.0, TINT);
+        commands.entity(enemy).insert((
+            Enemy,
+            Brain {
+                cooldown: Timer::from_seconds(ATTACK_COOLDOWN, TimerMode::Once),
+            },
+        ));
+    }
 }
 
 fn think(
