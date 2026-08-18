@@ -56,7 +56,7 @@ pub struct LevelPlugin;
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         // PreStartup so the grid and spawn points exist before anything spawns.
-        app.add_systems(PreStartup, (load_level, load_tileset))
+        app.add_systems(PreStartup, load_level)
             .add_systems(Startup, (draw_background, draw_tiles));
     }
 }
@@ -690,30 +690,6 @@ fn load_level(mut commands: Commands) {
     commands.insert_resource(level);
 }
 
-/// The shared tileset.
-#[derive(Resource)]
-struct Tileset {
-    image: Handle<Image>,
-    layout: Handle<TextureAtlasLayout>,
-}
-
-fn load_tileset(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
-) {
-    commands.insert_resource(Tileset {
-        image: asset_server.load(TILESET_PATH),
-        layout: layouts.add(TextureAtlasLayout::from_grid(
-            TILESET_TILE,
-            TILESET_COLUMNS,
-            TILESET_ROWS,
-            None,
-            None,
-        )),
-    });
-}
-
 impl Level {
     /// Pick a nine-slice tile for a cell from which of its neighbours match.
     ///
@@ -786,16 +762,44 @@ fn draw_background(
 /// Draw the level's tiles. Painted tiles are used as-is; a level with neither
 /// tiles nor a background falls back to deriving terrain from its collision, so
 /// blocked-out geometry is still visible before any art exists.
-fn draw_tiles(mut commands: Commands, level: Option<Res<Level>>, tileset: Option<Res<Tileset>>) {
-    let (Some(level), Some(tileset)) = (level, tileset) else {
-        return;
-    };
+fn draw_tiles(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+    level: Option<Res<Level>>,
+) {
+    let Some(level) = level else { return };
 
+    // A level painted as a single background needs no tileset at all. Loading
+    // one anyway asks the asset server for a file that may not exist, which is
+    // just noise in the log.
+    let derive_terrain = level.painted.is_empty() && level.background.is_none();
+    if level.painted.is_empty() && !derive_terrain {
+        return;
+    }
+
+    let file = std::path::Path::new("assets").join(TILESET_PATH);
+    if !file.exists() {
+        warn!(
+            "level wants tiles but {} is missing; drawing nothing",
+            file.display()
+        );
+        return;
+    }
+
+    let image = asset_server.load(TILESET_PATH);
+    let layout = layouts.add(TextureAtlasLayout::from_grid(
+        TILESET_TILE,
+        TILESET_COLUMNS,
+        TILESET_ROWS,
+        None,
+        None,
+    ));
     let sprite = |index: usize| {
         Sprite::from_atlas_image(
-            tileset.image.clone(),
+            image.clone(),
             TextureAtlas {
-                layout: tileset.layout.clone(),
+                layout: layout.clone(),
                 index,
             },
         )
@@ -812,12 +816,6 @@ fn draw_tiles(mut commands: Commands, level: Option<Res<Level>>, tileset: Option
                 Transform::from_xyz(tile.centre.x, tile.centre.y, TILE_Z),
             ));
         }
-        return;
-    }
-
-    // A background image *is* the level art, so deriving terrain on top of it
-    // would just cover it up.
-    if level.background.is_some() {
         return;
     }
 

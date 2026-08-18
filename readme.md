@@ -102,6 +102,29 @@ Collision is axis-separated: move and resolve horizontally, then vertically.
 Doing both at once cannot tell a wall from a floor. With no level loaded — which
 is how the tests run — characters fall back to flat ground at `GROUND_Y`.
 
+A level can skip tiles entirely: set a **background image** in LDtk's level
+properties and let the IntGrid carry collision on its own. The image is stretched
+to the level bounds, so it must be exactly the level's pixel size.
+
+Two tools support that workflow:
+
+```sh
+python3 tools/import_level_art.py generated.png --out level2.png --anchor bottom
+python3 tools/check_level.py
+```
+
+`import_level_art.py` crops a generated image to the level's aspect *then*
+scales it — resizing straight to the target would squash the art and shift the
+painted ground away from the collision. It reads the target size from the LDtk
+project so the two cannot disagree. `--palette` snaps to
+`assets/palettes/slasher.gpl`, which forces a shared look across levels
+generated in different sessions.
+
+`check_level.py` draws the collision over the art and reports the gap in pixels
+between the IntGrid's top edge and the ground line it detects in the picture.
+Run it after any art or collision change; it is the only way to catch drift
+without playing.
+
 `tools/blockout.py` writes a level's geometry from an ASCII map, which beats
 clicking for broad strokes. Close LDtk before running it.
 
