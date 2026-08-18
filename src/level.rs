@@ -57,7 +57,7 @@ impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         // PreStartup so the grid and spawn points exist before anything spawns.
         app.add_systems(PreStartup, (load_level, load_tileset))
-            .add_systems(Startup, draw_tiles);
+            .add_systems(Startup, (draw_background, draw_tiles));
     }
 }
 
@@ -77,6 +77,10 @@ struct RawLevel {
     px_hei: i32,
     #[serde(rename = "layerInstances")]
     layers: Vec<RawLayer>,
+    /// Level background image, set in LDtk's level properties. Relative to the
+    /// project file, not to `assets/`.
+    #[serde(default, rename = "bgRelPath")]
+    bg_rel_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +145,33 @@ fn feet_of(px: [f32; 2], width: f32, height: f32, pivot: [f32; 2]) -> Vec2 {
     )
 }
 
+/// Turn a path stored relative to the `.ldtk` file into one the `AssetServer`
+/// understands, i.e. relative to `assets/`.
+///
+/// LDtk writes things like `../tiles/village.png`; Bevy wants `tiles/village.png`.
+fn asset_path(project: &std::path::Path, relative: &str) -> Option<String> {
+    use std::path::Component;
+
+    let joined = project.parent()?.join(relative);
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            _ => {}
+        }
+    }
+    let path: std::path::PathBuf = parts.iter().collect();
+    Some(
+        path.strip_prefix("assets")
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/"),
+    )
+}
+
 // --- what the game actually uses --------------------------------------------
 
 /// A named place something should be spawned, already in world coordinates.
@@ -164,6 +195,10 @@ pub struct Level {
     /// is what gets drawn; the nine-slice derivation is only for a level whose
     /// art has not been painted yet.
     painted: Vec<PaintedTile>,
+    /// A single image covering the whole level, set in LDtk's level properties.
+    /// An alternative to tiles entirely: paint the level as one picture and let
+    /// the IntGrid carry the collision.
+    background: Option<String>,
 }
 
 pub struct PaintedTile {
@@ -372,7 +407,23 @@ mod tests {
                 .collect(),
             spawns: Vec::new(),
             painted: Vec::new(),
+            background: None,
         }
+    }
+
+    #[test]
+    fn ldtk_relative_paths_resolve_to_asset_paths() {
+        let project = std::path::Path::new("assets/levels/level1.ldtk");
+        assert_eq!(
+            asset_path(project, "../tiles/village.png").as_deref(),
+            Some("tiles/village.png")
+        );
+        assert_eq!(
+            asset_path(project, "backdrop.png").as_deref(),
+            Some("levels/backdrop.png")
+        );
+        // Anything that climbs out of `assets/` cannot be served.
+        assert_eq!(asset_path(project, "../../outside.png"), None);
     }
 
     /// A spawn marker must land on the ground whichever pivot its definition
@@ -585,6 +636,10 @@ fn load_level(mut commands: Commands) {
         cells: collision.int_grid.clone(),
         spawns: Vec::new(),
         painted: Vec::new(),
+        background: raw
+            .bg_rel_path
+            .as_deref()
+            .and_then(|rel| asset_path(&path, rel)),
     };
 
     level.spawns = raw
@@ -696,9 +751,41 @@ impl Level {
     }
 }
 
-/// Draw the level. Tiles painted in LDtk are used as-is; a level with none yet
-/// falls back to deriving terrain from its collision, so blocked-out geometry is
-/// visible before any art is placed.
+/// Z ordering. Characters sit at 10, so everything here stays behind them.
+const BACKGROUND_Z: f32 = -10.0;
+const TILE_Z: f32 = 0.0;
+
+/// Draw the level's background image, if it has one.
+///
+/// This is the tileset-free route: paint the level as a single picture the size
+/// of the level, and let the IntGrid carry collision independently. Stretched to
+/// the level's bounds, so an image whose pixel size matches the level maps 1:1.
+fn draw_background(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    level: Option<Res<Level>>,
+) {
+    let Some(level) = level else { return };
+    let Some(path) = level.background.clone() else {
+        return;
+    };
+    let bounds = level.bounds();
+
+    info!("level background: {path}");
+    commands.spawn((
+        Name::new("Level Background"),
+        Sprite {
+            image: asset_server.load(path),
+            custom_size: Some(bounds.size()),
+            ..default()
+        },
+        Transform::from_xyz(bounds.center().x, bounds.center().y, BACKGROUND_Z),
+    ));
+}
+
+/// Draw the level's tiles. Painted tiles are used as-is; a level with neither
+/// tiles nor a background falls back to deriving terrain from its collision, so
+/// blocked-out geometry is still visible before any art exists.
 fn draw_tiles(mut commands: Commands, level: Option<Res<Level>>, tileset: Option<Res<Tileset>>) {
     let (Some(level), Some(tileset)) = (level, tileset) else {
         return;
@@ -722,9 +809,15 @@ fn draw_tiles(mut commands: Commands, level: Option<Res<Level>>, tileset: Option
             commands.spawn((
                 Name::new("Painted Tile"),
                 s,
-                Transform::from_xyz(tile.centre.x, tile.centre.y, 0.0),
+                Transform::from_xyz(tile.centre.x, tile.centre.y, TILE_Z),
             ));
         }
+        return;
+    }
+
+    // A background image *is* the level art, so deriving terrain on top of it
+    // would just cover it up.
+    if level.background.is_some() {
         return;
     }
 
@@ -739,7 +832,7 @@ fn draw_tiles(mut commands: Commands, level: Option<Res<Level>>, tileset: Option
         commands.spawn((
             Name::new(format!("Tile {cx},{cy}")),
             sprite(index),
-            Transform::from_xyz(corner.x + half, corner.y + half, 0.0),
+            Transform::from_xyz(corner.x + half, corner.y + half, TILE_Z),
         ));
     }
 }
