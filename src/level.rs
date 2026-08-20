@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 use serde::Deserialize;
 
+use crate::run::{run_scoped, Run};
 use crate::world::GROUND_Y;
 
 const LEVELS_DIR: &str = "assets/levels";
@@ -57,7 +58,7 @@ impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         // PreStartup so the grid and spawn points exist before anything spawns.
         app.add_systems(PreStartup, load_level)
-            .add_systems(Startup, (draw_background, draw_tiles));
+            .add_systems(OnEnter(Run::Playing), (draw_background, draw_tiles));
     }
 }
 
@@ -272,6 +273,47 @@ impl Level {
                 _ => None,
             })
         })
+    }
+
+    /// A bare level carrying only spawn markers, for tests in other modules
+    /// that need a level to exist without caring about its geometry.
+    ///
+    /// Deliberately huge, and solid below `y = 0` so a character stands where
+    /// the no-level fallback puts him. An empty test level looks harmless and
+    /// is not: bodies sink through it, drift out of bounds, and take anything
+    /// positioned relative to them — a freshly loosed arrow, say — with them.
+    #[cfg(test)]
+    pub fn with_spawns(spawns: Vec<SpawnPoint>) -> Self {
+        const CELLS: usize = 400;
+        let tile = 16.0;
+        let mut cells = vec![EMPTY; CELLS * CELLS];
+        for cy in CELLS / 2..CELLS {
+            for cx in 0..CELLS {
+                cells[cy * CELLS + cx] = SOLID;
+            }
+        }
+        Self {
+            name: "test".into(),
+            width: CELLS,
+            height: CELLS,
+            tile,
+            origin: Vec2::splat(-(CELLS as f32) * tile / 2.0),
+            cells,
+            spawns,
+            painted: Vec::new(),
+            background: None,
+        }
+    }
+
+    /// Whether a world point is inside solid ground. Used by anything that
+    /// travels and should stop at a wall — an arrow, say — without needing the
+    /// full body-resolution machinery.
+    pub fn is_solid_at(&self, point: Vec2) -> bool {
+        let local = point - self.origin;
+        let top = self.height as f32 * self.tile;
+        let cx = (local.x / self.tile).floor() as isize;
+        let cy = ((top - local.y) / self.tile).floor() as isize;
+        self.value(cx, cy) == SOLID
     }
 
     /// Somewhere sensible to stand when the level names no spawn point: the
@@ -750,6 +792,7 @@ fn draw_background(
     info!("level background: {path}");
     commands.spawn((
         Name::new("Level Background"),
+        run_scoped(),
         Sprite {
             image: asset_server.load(path),
             custom_size: Some(bounds.size()),
@@ -812,6 +855,7 @@ fn draw_tiles(
             s.flip_y = tile.flip_y;
             commands.spawn((
                 Name::new("Painted Tile"),
+                run_scoped(),
                 s,
                 Transform::from_xyz(tile.centre.x, tile.centre.y, TILE_Z),
             ));
@@ -829,6 +873,7 @@ fn draw_tiles(
         let corner = level.cell_corner(cx, cy);
         commands.spawn((
             Name::new(format!("Tile {cx},{cy}")),
+            run_scoped(),
             sprite(index),
             Transform::from_xyz(corner.x + half, corner.y + half, TILE_Z),
         ));

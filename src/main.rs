@@ -5,6 +5,8 @@ mod combat;
 mod enemy;
 mod level;
 mod player;
+mod run;
+mod shrine;
 mod world;
 
 use bevy::prelude::*;
@@ -27,11 +29,13 @@ fn main() {
         .add_plugins((
             camera::CameraPlugin,
             world::WorldPlugin,
+            run::RunPlugin,
             level::LevelPlugin,
             character::CharacterPlugin,
             combat::CombatPlugin,
             player::PlayerPlugin,
             enemy::EnemyPlugin,
+            shrine::ShrinePlugin,
             animation::AnimationPlugin,
         ))
         .run();

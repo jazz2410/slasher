@@ -18,6 +18,8 @@ cargo run --release          # for actually playing
 | Jump | `Space`, `W`, or `↑` (hold for height) |
 | Attack | `J` or left mouse |
 | Block | hold `K` or right mouse |
+| Pray at a shrine | `E` (standing close) |
+| Fire arrow | `L` (once blessed) |
 
 The spear thrust runs on a fixed startup → active → recovery timeline. You are
 committed once it starts: no turning, no jumping, and no re-triggering until it
@@ -46,16 +48,50 @@ in `Kinds`.
 
 The enemy is tinted cold to tell the two apart.
 
-There is no health and no bar. A hit reads purely through the reaction:
+Every fighter carries 100 health and a small floating bar, and a spear thrust
+costs 25 — so a duel runs four clean hits.
 
-| Outcome | Feedback |
-| --- | --- |
-| Clean hit | Red flash, hard knockback, 0.34s of hitstun |
-| Guarded hit | Gold flash, light shove, 0.16s |
+| Guard | Health | What happens |
+| --- | --- | --- |
+| **Open** — no shield, or facing away | **-25** | Red flash, hard knockback, 0.34s hitstun |
+| **Stale** — shield up over 0.18s | **-8** | Gold flash, light shove |
+| **Parried** — shield raised within 0.18s | **none** | Attacker staggered for 0.5s |
+
+Blocking is a timing test, not a state. Raise the shield as the thrust comes in
+and you take nothing *and* leave the attacker open long enough to punish. Hold it
+down and the guard goes stale — it still turns the blade, but the shock gets
+through. Without that decay, turtling would be the correct answer to every
+attack, which is the same as having no fight at all.
+
+At zero health an enemy is despawned. When the **player** dies the level
+restarts: after a 0.8s pause everything the run owns is cleared and rebuilt.
 
 The shield only covers the side you face, so turning your back means eating the
 thrust. One thrust can strike a given target only once, however many frames its
 active window spans.
+
+## The shrine
+
+Praying at a shrine puts the player **in a state**: while blessed, `L` looses a
+fire arrow that flies flat and kills the first body it touches. Without the
+state the button does nothing.
+
+| Source | Charge |
+| --- | --- |
+| `Shrine` entity, prayed at with `E` | **Single** — loosing the arrow ends the state |
+| `EternalFlame` entity anywhere in the level | **Endless** — never spent, 2.5s cooldown |
+
+So a shrine is one arrow: spend it and you must find another shrine. A level
+carrying an `EternalFlame` marker instead leaves the player permanently able to
+cast — the marker's position is irrelevant, its presence is the whole statement.
+
+Either way the state is scoped to the run, so dying costs it. While blessed the
+spartan is tinted with the god's fire; because that tint is applied to his
+*base* colour, a damage flash still restores to it and the state survives being
+hit.
+
+Nothing about it is level-specific: `level.rs` reads spawn markers by name, so
+placing shrines is editor work with no code change.
 
 ## Layout
 
@@ -65,13 +101,32 @@ active window spans.
 | [src/character.rs](src/character.rs) | Shared body: physics, attack/block state, animation |
 | [src/player.rs](src/player.rs) | Keyboard and mouse into `Intent` |
 | [src/enemy.rs](src/enemy.rs) | AI into `Intent` |
-| [src/combat.rs](src/combat.rs) | Hit resolution, knockback, damage flash |
+| [src/combat.rs](src/combat.rs) | Hit resolution, guards, health, knockback |
+| [src/run.rs](src/run.rs) | Playing / dying / restarting a level |
+| [src/shrine.rs](src/shrine.rs) | Shrine, blessing, fire arrow |
 | [src/animation.rs](src/animation.rs) | Reusable spritesheet animation driver |
 | [src/camera.rs](src/camera.rs) | Follow camera with fixed vertical framing |
 | [src/world.rs](src/world.rs) | Placeholder ground and pillars |
 
 Each module is a Bevy `Plugin`, so adding a system means adding it to that
 module's `build` rather than touching `main.rs`.
+
+## Runs and restarting
+
+A level's *data* — collision grid, spawn points, art — is loaded once and never
+mutated, so a restart is not a reload. It is a despawn of everything the run
+owns followed by a respawn from that data, which is what makes a retry instant.
+
+Everything belonging to a run carries `DespawnOnExit(Run::Playing)`, so leaving
+that state clears the board with no bookkeeping. Anything that should survive a
+death — the camera, the loaded level, the character blueprints — simply does not
+carry it. Adding a level transition later means changing *which* level is loaded
+on entering `Playing`, not adding more states.
+
+`Run` starts in `Loading` rather than `Playing` for a specific reason:
+`bevy_state` inserts the first `StateTransition` **before `PreStartup`**, so a
+default of `Playing` would fire `OnEnter` before the level and blueprints exist.
+`PostStartup` steps out of `Loading` once startup has run.
 
 ## Levels
 
@@ -142,10 +197,15 @@ validates it against LDtk's published JSON schema.
 
 ## Sprites
 
-The game loads `assets/sprites/spartan_combat.png` — a 540x256 atlas, 5x4 cells
-of 108x64. Row 0 is the walk cycle (atlas indices 0-4); rows 1-3 are one
-continuous 15-frame spear thrust (5-19). Frame constants live at the top of
+The game loads `assets/sprites/spartan_combat.png` — a 540x576 atlas, 5x9 cells
+of 108x64. Frame constants live at the top of
 [src/character.rs](src/character.rs).
+
+| Rows | Indices | Animation |
+| --- | --- | --- |
+| 0 | 0-4 | Walk cycle |
+| 1-3 | 5-19 | Spear thrust, one continuous 15 frames |
+| 4-8 | 20-44 | Fire blast, 25 frames |
 
 That atlas is **generated**. `tools/build_sheet.py` stacks the already-gridded
 source sheets into it, checking they agree on cell size and that every frame is
@@ -160,14 +220,46 @@ python3 tools/build_sheet.py
 | --- | --- |
 | `spartan_walk.png` | row 0, indices 0-4 |
 | `spartan_attack_game.png` | rows 1-3, indices 5-19 |
+| `spartan_firespear_game.png` | rows 4-8, indices 20-44 |
+
+Death uses its own `spartan_dies_game.png` atlas: 25 frames in a 5x5 grid of
+146x96 cells. It stays separate because the fallen body and spear are wider
+than the combat atlas cells. Regenerate it from `spartan_dies.png` with:
+
+```sh
+python3 tools/process_sprite.py assets/sprites/spartan_dies.png \
+    --out assets/sprites/spartan_dies_game.png --frames-per-row 5 \
+    --cell-width 146 --cell-height 96 --target-height 54 --baseline-from-top 78 \
+    --prone-anchor-ratio 0.63
+```
+
+The taller cells leave room for the smoke while keeping the character's feet
+on the same in-game baseline as every standing animation.
+
+`process_sprite.py` produced that last one from `spartan_firespear.png`:
+
+```sh
+python3 tools/process_sprite.py assets/sprites/spartan_firespear.png \
+    --out assets/sprites/spartan_firespear_game.png \
+    --frames-per-row 5 --cell-width 108 --side-margin 1
+```
+
+`--cell-width` forces the result to match the atlas it is joining, and
+`--side-margin` buys the last couple of pixels when a longer weapon would
+otherwise not fit.
 
 `tools/process_sprite.py` is the older, heavier tool: it rescues art off an
 opaque backdrop with no usable grid, keying out the background and re-anchoring
 each frame. Use it only when a source is not already game-ready.
 
-**There is currently no block animation.** `BLOCK_CLIP` borrows the thrust's
+**There is currently no block animation.** `Clips::block` borrows the thrust's
 opening frame as a stand-in; blocking works mechanically, but it looks like a
 wind-up rather than a guard.
+
+**`START_BLESSED` in [src/shrine.rs](src/shrine.rs) is on**, so every run begins
+able to cast — convenient for testing the fire blast without walking to a
+shrine. Turn it off once shrines are placed in levels. It is forced off under
+`cfg(test)` so it cannot invalidate the tests about *not* being blessed.
 
 The world uses **1 unit = 1 source pixel**, and the camera is set to a fixed
 360-unit viewport height, so the game letterboxes consistently at any window
@@ -181,8 +273,8 @@ atlas indices. To add an animation:
 
 1. Add the action source PNG under `assets/sprites/`.
 2. Add a processor that outputs 108x64 cells with the same body/feet anchor.
-3. Load that action's image and atlas layout in `spawn_player`.
+3. Load that action's image and atlas layout in the character blueprint.
 4. Select its clip and sprite sheet from `update_animation`.
 
 Non-looping clips (`repeat: false`) hold on their last frame, which is what you
-want for an attack that returns control on completion.
+want for the death animation while its state timer finishes.

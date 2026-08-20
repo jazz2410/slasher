@@ -19,6 +19,7 @@ OUT = "assets/sprites/spartan_combat.png"
 SOURCES = [
     ("assets/sprites/spartan_walk.png", "walk"),
     ("assets/sprites/spartan_attack_game.png", "attack"),
+    ("assets/sprites/spartan_firespear_game.png", "firespear"),
 ]
 
 

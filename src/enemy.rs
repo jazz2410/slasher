@@ -3,9 +3,10 @@
 
 use bevy::prelude::*;
 
-use crate::character::{spawn_character, Attacking, CharacterSet, Facing, Intent, Kinds};
+use crate::character::{spawn_character, Attacking, CharacterSet, Dying, Facing, Intent, Kinds};
 use crate::level::Level;
 use crate::player::Player;
+use crate::run::{run_scoped, Run};
 use crate::world::GROUND_Y;
 
 const START_X: f32 = 180.0;
@@ -28,7 +29,7 @@ pub struct EnemyPlugin;
 
 impl Plugin for EnemyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_enemy)
+        app.add_systems(OnEnter(Run::Playing), spawn_enemy)
             .add_systems(Update, think.before(CharacterSet::Control));
     }
 }
@@ -63,6 +64,7 @@ fn spawn_enemy(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Leve
         let enemy = spawn_character(&mut commands, &kinds.spartan, "Enemy", feet, -1.0, TINT);
         commands.entity(enemy).insert((
             Enemy,
+            run_scoped(),
             Brain {
                 cooldown: Timer::from_seconds(ATTACK_COOLDOWN, TimerMode::Once),
             },
@@ -73,7 +75,10 @@ fn spawn_enemy(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Leve
 fn think(
     time: Res<Time>,
     player: Query<&Transform, (With<Player>, Without<Enemy>)>,
-    mut enemies: Query<(&Transform, &mut Intent, &mut Facing, &mut Brain, Option<&Attacking>), With<Enemy>>,
+    mut enemies: Query<
+        (&Transform, &mut Intent, &mut Facing, &mut Brain, Option<&Attacking>),
+        (With<Enemy>, Without<Dying>),
+    >,
 ) {
     let Ok(player_transform) = player.single() else {
         return;

@@ -2,8 +2,9 @@
 
 use bevy::prelude::*;
 
-use crate::character::{spawn_character, Attacking, CharacterSet, Facing, Intent, Kinds};
+use crate::character::{spawn_character, Attacking, CharacterSet, Dying, Facing, Intent, Kinds};
 use crate::level::Level;
+use crate::run::{run_scoped, Run};
 use crate::world::GROUND_Y;
 
 const START_X: f32 = -140.0;
@@ -12,7 +13,7 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_player)
+        app.add_systems(OnEnter(Run::Playing), spawn_player)
             .add_systems(Update, read_input.before(CharacterSet::Control));
     }
 }
@@ -30,13 +31,16 @@ fn spawn_player(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Lev
     };
 
     let player = spawn_character(&mut commands, &kinds.spartan, "Player", feet, 1.0, Color::WHITE);
-    commands.entity(player).insert(Player);
+    commands.entity(player).insert((Player, run_scoped()));
 }
 
 fn read_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut query: Query<(&mut Intent, &mut Facing, Option<&Attacking>), With<Player>>,
+    mut query: Query<
+        (&mut Intent, &mut Facing, Option<&Attacking>),
+        (With<Player>, Without<Dying>),
+    >,
 ) {
     let left = keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]);
     let right = keys.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]);
@@ -63,13 +67,15 @@ fn read_input(
 mod tests {
     use super::*;
     use crate::character::{
-        Blocking, CharacterPlugin, Reach, SPARTAN_BODY, SPARTAN_HURTBOX, SPARTAN_STATS,
+        Blocking, CharacterPlugin, Dying, Reach, DEATH_DURATION, SPARTAN_BODY, SPARTAN_CLIPS,
+        SPARTAN_HURTBOX, SPARTAN_STATS,
     };
 
     /// The spartan's own numbers, so the tests move with the blueprint.
     const ATTACK_DURATION: f32 = SPARTAN_STATS.attack.total();
-    use crate::combat::{CombatPlugin, Hurt};
+    use crate::combat::{CombatPlugin, Health, Hurt, CHIP_DAMAGE, MAX_HEALTH, SPEAR_DAMAGE};
     use crate::enemy::EnemyPlugin;
+    use crate::run::{Run, RunPlugin};
     use bevy::time::TimeUpdateStrategy;
     use std::time::Duration;
 
@@ -86,7 +92,11 @@ mod tests {
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
                 DT,
             )))
-            .add_plugins((CharacterPlugin, CombatPlugin, PlayerPlugin));
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .add_plugins((CharacterPlugin, CombatPlugin, PlayerPlugin, RunPlugin));
+        // Two ticks: the first enters Run::Playing, the second lets the spawns
+        // it queued actually exist.
+        app.update();
         app.update();
         app
     }
@@ -103,7 +113,9 @@ mod tests {
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
                 DT,
             )))
-            .add_plugins((CharacterPlugin, CombatPlugin, PlayerPlugin, EnemyPlugin));
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .add_plugins((CharacterPlugin, CombatPlugin, PlayerPlugin, EnemyPlugin, RunPlugin));
+        app.update();
         app.update();
         app
     }
@@ -351,8 +363,369 @@ mod tests {
                 // its knockback would never decay.
                 SPARTAN_STATS,
                 SPARTAN_BODY,
+                Health::full(MAX_HEALTH),
             ))
             .id()
+    }
+
+    fn health_of(app: &mut App, entity: Entity) -> Option<f32> {
+        app.world().get::<Health>(entity).map(|h| h.current)
+    }
+
+    fn player_health(app: &mut App) -> f32 {
+        app.world_mut()
+            .query_filtered::<&Health, With<Player>>()
+            .single(app.world())
+            .unwrap()
+            .current
+    }
+
+    #[test]
+    fn a_clean_hit_costs_health() {
+        let mut app = test_app();
+        let ahead = x_of::<Player>(&mut app) + 35.0;
+        let dummy = spawn_dummy(&mut app, ahead);
+        assert_eq!(health_of(&mut app, dummy), Some(MAX_HEALTH));
+
+        tap_attack(&mut app);
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 2 {
+            app.update();
+        }
+
+        let left = health_of(&mut app, dummy).expect("dummy should still be alive");
+        // Both assertions matter: the first pins the amount, the second catches
+        // a zeroed SPEAR_DAMAGE, which would satisfy the first vacuously.
+        assert_eq!(
+            left,
+            MAX_HEALTH - SPEAR_DAMAGE,
+            "one thrust should cost exactly one thrust's worth"
+        );
+        assert!(left < MAX_HEALTH, "a thrust must actually cost something");
+    }
+
+    /// Holding the shield down is not an answer: the guard goes stale and the
+    /// shock gets through. This is what stops turtling being optimal.
+    #[test]
+    fn a_stale_guard_still_takes_chip_damage() {
+        let mut app = duel_app();
+        set_key(&mut app, KeyCode::KeyK, true);
+
+        let mut guarded = false;
+        for _ in 0..400 {
+            app.update();
+            if hurt_of::<Player>(&mut app) == Some(true) {
+                guarded = true;
+                break;
+            }
+        }
+        assert!(guarded, "the enemy never landed a hit on the raised shield");
+        let left = player_health(&mut app);
+        assert_eq!(left, MAX_HEALTH - CHIP_DAMAGE, "a stale guard should chip");
+        assert!(
+            left > MAX_HEALTH - SPEAR_DAMAGE,
+            "a stale guard should still beat taking it clean"
+        );
+    }
+
+    /// A guard raised as the thrust comes in takes nothing and staggers the
+    /// attacker — the reward that makes timing worth the risk.
+    #[test]
+    fn a_fresh_guard_parries_and_staggers_the_attacker() {
+        let mut app = duel_app();
+
+        // Wait for the enemy to commit, then raise the shield into it.
+        let mut committed = false;
+        for _ in 0..400 {
+            app.update();
+            if app
+                .world_mut()
+                .query_filtered::<Entity, (With<Attacking>, With<crate::enemy::Enemy>)>()
+                .iter(app.world())
+                .next()
+                .is_some()
+            {
+                committed = true;
+                break;
+            }
+        }
+        assert!(committed, "the enemy never attacked");
+
+        set_key(&mut app, KeyCode::KeyK, true);
+        let mut parried = false;
+        for _ in 0..40 {
+            app.update();
+            if hurt_of::<Player>(&mut app).is_some() {
+                parried = true;
+                break;
+            }
+        }
+        assert!(parried, "the thrust never landed on the fresh guard");
+        assert_eq!(
+            player_health(&mut app),
+            MAX_HEALTH,
+            "a parry must cost nothing at all"
+        );
+
+        let staggered = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Hurt>, With<crate::enemy::Enemy>)>()
+            .iter(app.world())
+            .next()
+            .is_some();
+        assert!(staggered, "a parry should stagger the attacker");
+    }
+
+    /// ...and the same hit unguarded does take health, so the test above is not
+    /// passing merely because nothing ever connects.
+    #[test]
+    fn an_unguarded_hit_from_the_enemy_costs_health() {
+        let mut app = duel_app();
+
+        let mut struck = false;
+        for _ in 0..400 {
+            app.update();
+            if hurt_of::<Player>(&mut app) == Some(false) {
+                struck = true;
+                break;
+            }
+        }
+        assert!(struck, "the enemy never landed a clean hit");
+        assert!(
+            player_health(&mut app) < MAX_HEALTH,
+            "an unguarded thrust should have cost health"
+        );
+    }
+
+    fn count<T: Component>(app: &mut App) -> usize {
+        app.world_mut()
+            .query_filtered::<Entity, With<T>>()
+            .iter(app.world())
+            .count()
+    }
+
+    fn run_state(app: &App) -> Run {
+        app.world().resource::<State<Run>>().get().clone()
+    }
+
+    /// Play it for real: walk into the enemy, let him kill you, and expect the
+    /// level back.
+    ///
+    /// The forced-health tests above all passed while this was broken. Setting
+    /// health to zero by hand happens *between* frames, so the death was always
+    /// observed; in a real fight the blow lands mid-frame, and the ordering bug
+    /// only showed up there. A test has to lose the fight the way a player does.
+    #[test]
+    fn losing_a_real_fight_restarts_the_level() {
+        let mut app = whole_game_app();
+        set_key(&mut app, KeyCode::KeyD, true); // walk into him and take it
+
+        let mut died_at = None;
+        for frame in 0..600 {
+            app.update();
+            if died_at.is_none() && count::<Player>(&mut app) == 0 {
+                died_at = Some(frame);
+            }
+        }
+
+        let died_at = died_at.expect("the enemy never managed to kill a passive player");
+        assert_eq!(
+            run_state(&app),
+            Run::Playing,
+            "died on frame {died_at} but the run never came back"
+        );
+        assert_eq!(count::<Player>(&mut app), 1, "the player should be back");
+        assert_eq!(count::<crate::enemy::Enemy>(&mut app), 1, "so should the enemy");
+    }
+
+    /// The full plugin set, as `main.rs` assembles it minus rendering. The
+    /// slimmer apps above can miss anything caused by plugin interaction.
+    fn whole_game_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<Image>()
+            .init_asset::<TextureAtlasLayout>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+                DT,
+            )))
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .add_plugins((
+                crate::world::WorldPlugin,
+                crate::run::RunPlugin,
+                crate::level::LevelPlugin,
+                CharacterPlugin,
+                CombatPlugin,
+                PlayerPlugin,
+                EnemyPlugin,
+                crate::animation::AnimationPlugin,
+            ));
+        app.update();
+        app.update();
+        app
+    }
+
+    #[test]
+    fn dying_restarts_the_level_with_the_whole_game_running() {
+        let mut app = whole_game_app();
+        assert_eq!(count::<Player>(&mut app), 1, "the player should have spawned");
+        let original = app
+            .world_mut()
+            .query_filtered::<Entity, With<Player>>()
+            .single(app.world())
+            .unwrap();
+
+        {
+            let mut query = app.world_mut().query_filtered::<&mut Health, With<Player>>();
+            query.single_mut(app.world_mut()).unwrap().current = 0.0;
+        }
+
+        let mut saw_animation = false;
+        let mut restarted = false;
+        for _ in 0..300 {
+            app.update();
+            saw_animation |= app.world().get::<Dying>(original).is_some();
+            if app.world().get_entity(original).is_err()
+                && run_state(&app) == Run::Playing
+                && count::<Player>(&mut app) == 1
+            {
+                restarted = true;
+                break;
+            }
+        }
+        assert!(saw_animation, "the player skipped the death animation");
+        assert!(restarted, "the level never came back (state {:?})", run_state(&app));
+        assert_eq!(player_health(&mut app), MAX_HEALTH);
+    }
+
+    /// Dying rebuilds the level from data that was never mutated, so a retry is
+    /// a despawn and a respawn rather than a reload.
+    #[test]
+    fn dying_restarts_the_level() {
+        let mut app = duel_app();
+        let enemies_at_start = count::<crate::enemy::Enemy>(&mut app);
+        assert!(enemies_at_start > 0, "the duel should start with an enemy");
+        assert_eq!(run_state(&app), Run::Playing);
+
+        // Strike him down.
+        {
+            let mut query = app.world_mut().query_filtered::<&mut Health, With<Player>>();
+            query.single_mut(app.world_mut()).unwrap().current = 0.0;
+        }
+        // The player remains in the level while all death frames play.
+        app.update();
+        assert_eq!(run_state(&app), Run::Playing);
+        assert_eq!(count::<Player>(&mut app), 1);
+        assert_eq!(count::<Dying>(&mut app), 1);
+
+        for _ in 0..(DEATH_DURATION / DT).ceil() as usize + 3 {
+            app.update();
+            if run_state(&app) == Run::Ended {
+                break;
+            }
+        }
+        assert_eq!(run_state(&app), Run::Ended, "death should end the run");
+        assert_eq!(count::<Player>(&mut app), 0, "the run should be torn down");
+        assert_eq!(count::<crate::enemy::Enemy>(&mut app), 0);
+
+        // ...and comes back.
+        for _ in 0..120 {
+            app.update();
+            if run_state(&app) == Run::Playing && count::<Player>(&mut app) == 1 {
+                break;
+            }
+        }
+
+        assert_eq!(run_state(&app), Run::Playing, "the level should restart");
+        assert_eq!(count::<Player>(&mut app), 1, "exactly one player, not two");
+        assert_eq!(
+            count::<crate::enemy::Enemy>(&mut app),
+            enemies_at_start,
+            "the enemies should be back, and only once each"
+        );
+        assert_eq!(
+            player_health(&mut app),
+            MAX_HEALTH,
+            "a restarted level starts at full health"
+        );
+    }
+
+    /// Restarting repeatedly must not leave anything behind.
+    #[test]
+    fn repeated_deaths_do_not_accumulate() {
+        let mut app = duel_app();
+        let enemies = count::<crate::enemy::Enemy>(&mut app);
+
+        for round in 0..3 {
+            {
+                let mut query = app.world_mut().query_filtered::<&mut Health, With<Player>>();
+                query.single_mut(app.world_mut()).unwrap().current = 0.0;
+            }
+            for _ in 0..120 {
+                app.update();
+                if run_state(&app) == Run::Playing && count::<Player>(&mut app) == 1 {
+                    break;
+                }
+            }
+            assert_eq!(count::<Player>(&mut app), 1, "round {round}: one player");
+            assert_eq!(
+                count::<crate::enemy::Enemy>(&mut app),
+                enemies,
+                "round {round}: enemies should not stack up"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spent_fighter_remains_as_a_harmless_corpse() {
+        let mut app = test_app();
+        let ahead = x_of::<Player>(&mut app) + 35.0;
+        let dummy = spawn_dummy(&mut app, ahead);
+
+        // One thrust from dead.
+        app.world_mut().get_mut::<Health>(dummy).unwrap().current = SPEAR_DAMAGE;
+
+        tap_attack(&mut app);
+        for _ in 0..(ATTACK_DURATION / DT).ceil() as usize + 4 {
+            app.update();
+        }
+
+        assert!(
+            app.world().get::<Dying>(dummy).is_some(),
+            "a lethal hit should begin the death state"
+        );
+        for _ in 0..(DEATH_DURATION / DT).ceil() as usize + 3 {
+            app.update();
+        }
+
+        assert!(
+            app.world().get_entity(dummy).is_ok(),
+            "a defeated fighter should hold the final death frame"
+        );
+        assert!(
+            app.world().get::<crate::combat::Hurtbox>(dummy).is_none(),
+            "a corpse must no longer be a combat target"
+        );
+    }
+
+    #[test]
+    fn the_enemy_uses_the_death_animation_before_leaving() {
+        let mut app = duel_app();
+        let enemy = app
+            .world_mut()
+            .query_filtered::<Entity, With<crate::enemy::Enemy>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().get_mut::<Health>(enemy).unwrap().current = 0.0;
+
+        app.update();
+
+        assert!(app.world().get::<Dying>(enemy).is_some());
+        assert_eq!(
+            *app.world().get::<crate::animation::AnimationClip>(enemy).unwrap(),
+            SPARTAN_CLIPS.death
+        );
     }
 
     /// Thrust from inside spear range; the target should flinch.

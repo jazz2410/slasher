@@ -12,27 +12,75 @@ hand-placed figures that share no common grid. This script:
      centred so `flip_x` mirrors in place,
   6. quantises to kill the resampling noise (the sources carry ~80k colours).
 
-Usage:  python3 tools/process_sprite.py [source.png]
+Usage:
+    python3 tools/process_sprite.py                       # the original sheet
+    python3 tools/process_sprite.py src.png --out out.png --frames-per-row 5 \
+        --cell-width 108
+    python3 tools/process_sprite.py assets/sprites/spartan_dies.png \
+        --out assets/sprites/spartan_dies_game.png --frames-per-row 5 \
+        --cell-width 146 --cell-height 96 --target-height 54 --baseline-from-top 78 \
+        --prone-anchor-ratio 0.63
 """
+import argparse
 import sys
 
 import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-SRC = sys.argv[1] if len(sys.argv) > 1 else (
-    "assets/sprites/spartan_sprite_all.png"
+_ap = argparse.ArgumentParser(description=__doc__)
+_ap.add_argument("source", nargs="?", default="assets/sprites/spartan_sprite_all.png")
+_ap.add_argument("--out", default="assets/sprites/spartan_combat.png")
+_ap.add_argument("--frames-per-row", type=int, default=6)
+_ap.add_argument(
+    "--cell-width",
+    type=int,
+    help="force the cell width instead of deriving it, so a sheet can join an "
+    "atlas that already has one",
 )
-OUT = "assets/sprites/spartan_combat.png"
+_ap.add_argument(
+    "--side-margin",
+    type=int,
+    default=3,
+    help="clearance beyond the widest reach; lower it to fit a longer weapon "
+    "into an existing cell width",
+)
+_ap.add_argument(
+    "--cell-height",
+    type=int,
+    default=64,
+    help="height of each output cell (death effects need more headroom)",
+)
+_ap.add_argument(
+    "--target-height",
+    type=float,
+    default=60.0,
+    help="mean source-frame height after scaling",
+)
+_ap.add_argument(
+    "--baseline-from-top",
+    type=int,
+    help="output y coordinate for the feet; defaults to cell height minus 2",
+)
+_ap.add_argument(
+    "--prone-anchor-ratio",
+    type=float,
+    help="anchor very wide, short prone frames at this fraction of their width",
+)
+_args = _ap.parse_args()
 
-CELL_H = 64
-TARGET_WALK_HEIGHT = 60.0  # character height in game units
+SRC = _args.source
+OUT = _args.out
+
+CELL_H = _args.cell_height
+TARGET_WALK_HEIGHT = _args.target_height
 BASELINE_MARGIN = 2        # px of empty space under the feet
-SIDE_MARGIN = 3            # px of clearance beyond the widest reach
+BASELINE_Y = _args.baseline_from_top or CELL_H - BASELINE_MARGIN
+SIDE_MARGIN = _args.side_margin  # px of clearance beyond the widest reach
 PALETTE_COLOURS = 32
 MIN_BAND_HEIGHT = 20       # ignore 1px anti-aliasing seams
 MIN_FIGURE_WIDTH = 20
-FRAMES_PER_ROW = 6
+FRAMES_PER_ROW = _args.frames_per_row
 # Sum-of-channels distance from a backdrop colour still counted as backdrop.
 # Must stay well under the darkest outline: black backdrop is 0, the outline
 # lands around 58, so this keeps the outline while absorbing its anti-aliasing.
@@ -40,8 +88,11 @@ BG_TOLERANCE = 30
 BORDER_COLOUR_SHARE = 0.02
 
 
-def foreground_mask(rgb: np.ndarray) -> np.ndarray:
+def foreground_mask(rgb, alpha):
     """True where the image is figure rather than backdrop.
+
+    A source that already has transparency has done this job for us, and its
+    own alpha is more trustworthy than anything inferred from colour.
 
     The backdrop colours are read off the image's own border rather than
     assumed. A fixed luminance threshold is dangerous here: the character's
@@ -49,6 +100,10 @@ def foreground_mask(rgb: np.ndarray) -> np.ndarray:
     swallows the outline, then the flood fill pours through the hole and eats
     the shading inside too, leaving the figure in pieces.
     """
+    if alpha is not None and alpha.min() < 255:
+        print("source has transparency; using its alpha as the mask")
+        return alpha > 8
+
     edges = np.concatenate([rgb[0, :], rgb[-1, :], rgb[:, 0], rgb[:, -1]])
     colours, counts = np.unique(edges.reshape(-1, 3), axis=0, return_counts=True)
     # Only colours that genuinely tile the border count as backdrop.
@@ -76,9 +131,11 @@ def runs(indices, gap: int):
     return out
 
 
-src = Image.open(SRC).convert("RGB")
+raw = Image.open(SRC)
+alpha = np.asarray(raw.convert("RGBA"))[:, :, 3]
+src = raw.convert("RGB")
 rgb = np.asarray(src).astype(int)
-fg = foreground_mask(rgb)
+fg = foreground_mask(rgb, alpha)
 height, width = fg.shape
 
 def merge_to(figures, target):
@@ -122,10 +179,10 @@ for y0, y1 in bands:
         row.append((x0 + xs.min(), x0 + xs.max() + 1, y0 + ys.min(), y0 + ys.max() + 1))
     layout.append(row)
 
-walk_h = np.mean([b[3] - b[2] for b in layout[0]])
+walk_h = np.mean([b[3] - b[2] for row in layout for b in row])
 scale = TARGET_WALK_HEIGHT / walk_h
 print(f"source {SRC}")
-print(f"walk mean height {walk_h:.0f}px -> uniform scale {scale:.4f}")
+print(f"figure mean height {walk_h:.0f}px -> uniform scale {scale:.4f}")
 
 alpha = np.where(fg, 255, 0).astype(np.uint8)
 keyed = Image.fromarray(np.dstack([rgb.astype(np.uint8), alpha]))
@@ -139,6 +196,12 @@ def torso_x(mask: np.ndarray) -> float:
     on the leading foot throws the thrust around by ~19px. Using one anchor for
     both rows also means the body cannot jump sideways when an attack starts.
     """
+    # Once a character is lying down there is no useful "upper half" to
+    # measure. Keep the hips/root planted instead, or the long spear pulls the
+    # final frame sideways when the smoke disappears.
+    if _args.prone_anchor_ratio is not None and mask.shape[1] > mask.shape[0] * 3:
+        return mask.shape[1] * _args.prone_anchor_ratio
+
     xs = np.where(mask[: max(2, mask.shape[0] // 2), :])[1]
     return xs.mean() if len(xs) else mask.shape[1] / 2
 
@@ -163,15 +226,23 @@ for r, row in enumerate(layout):
         prepared.append((r, c, small, int(round(torso_x(mask)))))
 
 reach = max(max(anchor, small.width - anchor) for _, _, small, anchor in prepared)
-cell_w = 2 * (reach + SIDE_MARGIN)
-cell_w += cell_w % 2
+if _args.cell_width:
+    cell_w = _args.cell_width
+    needed = 2 * (reach + SIDE_MARGIN)
+    if needed > cell_w:
+        raise SystemExit(
+            f"--cell-width {cell_w} is too narrow: the widest frame needs {needed}"
+        )
+else:
+    cell_w = 2 * (reach + SIDE_MARGIN)
+    cell_w += cell_w % 2
 print(f"widest reach from the feet anchor: {reach}px -> {cell_w}x{CELL_H} cells")
 
 sheet = Image.new("RGBA", (cell_w * FRAMES_PER_ROW, CELL_H * ROWS), (0, 0, 0, 0))
 for r, c, small, anchor in prepared:
     sheet.alpha_composite(
         small,
-        (c * cell_w + cell_w // 2 - anchor, r * CELL_H + CELL_H - BASELINE_MARGIN - small.height),
+        (c * cell_w + cell_w // 2 - anchor, r * CELL_H + BASELINE_Y - small.height),
     )
     print(f"  r{r} c{c}: {small.width:>3}x{small.height:<3} anchor_x={anchor}")
 
@@ -195,5 +266,5 @@ feet = [
     for c in range(FRAMES_PER_ROW)
 ]
 print(f"\nwrote {OUT} {final.size}")
-print(f"feet sit {set(feet)} px above each cell bottom -> HALF_HEIGHT = {CELL_H // 2 - BASELINE_MARGIN}")
+print(f"feet sit {set(feet)} px above each cell bottom")
 print(f"set FRAME_SIZE to UVec2::new({cell_w}, {CELL_H}), FRAME_ROWS = {ROWS}")
