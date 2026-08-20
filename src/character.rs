@@ -48,10 +48,24 @@ const SPARTAN_ATTACK_FRAMES: f32 = 15.0;
 const SPARTAN_CAST_FRAMES: f32 = 25.0;
 const SPARTAN_DEATH_FRAMES: f32 = 25.0;
 
+/// The archer uses the same five-column convention, but his standing frames
+/// need two extra pixels of headroom for the raised bow.
+const ARCHER_SHEET: &str = "sprites/archer_combat.png";
+const ARCHER_FRAME: UVec2 = UVec2::new(108, 66);
+const ARCHER_COLUMNS: u32 = 5;
+const ARCHER_ROWS: u32 = 10;
+const ARCHER_DEATH_SHEET: &str = "sprites/archer_dies_game.png";
+const ARCHER_DEATH_FRAME: UVec2 = UVec2::new(108, 96);
+const ARCHER_DEATH_COLUMNS: u32 = 5;
+const ARCHER_DEATH_ROWS: u32 = 5;
+const ARCHER_ANIMATION_FRAMES: f32 = 25.0;
+
 pub const PLAYER_MAX_HEALTH: f32 = 100.0;
 pub const PLAYER_ATTACK_DAMAGE: f32 = 25.0;
 pub const ENEMY_STANDARD_MAX_HEALTH: f32 = 100.0;
 pub const ENEMY_STANDARD_ATTACK_DAMAGE: f32 = 25.0;
+pub const ARCHER_MAX_HEALTH: f32 = 100.0;
+pub const ARCHER_ATTACK_DAMAGE: f32 = 25.0;
 
 pub const PLAYER_STATS: Stats = Stats {
     run_speed: 160.0,
@@ -78,11 +92,30 @@ pub const ENEMY_STANDARD_STATS: Stats = Stats {
     },
 };
 
+/// Kept separate from the melee enemy so the archer can be tuned without
+/// changing any other fighter. His attack duration drives the bow animation.
+pub const ARCHER_STATS: Stats = Stats {
+    run_speed: 105.0,
+    jump_speed: 420.0,
+    lunge_speed: 0.0,
+    attack: AttackTiming {
+        startup: 0.38,
+        active: 0.10,
+        recovery: 0.32,
+    },
+};
+
 /// Centre-to-feet: every frame is baselined 2px above the cell bottom. The
 /// collider is narrower than the art so he fits through a one-tile gap.
 pub const SPARTAN_BODY: Body = Body {
     half_height: 30.0,
     half_width: 9.0,
+};
+
+/// The archer art is intentionally about 10% smaller than the Spartans.
+pub const ARCHER_BODY: Body = Body {
+    half_height: 27.0,
+    half_width: 8.0,
 };
 
 /// Measured off the thrust frames: at full extension the spear tip reaches 43px
@@ -95,6 +128,7 @@ pub const SPARTAN_REACH: Reach = Reach {
 
 /// The body itself — narrower than a cell, since the cell is mostly reach.
 pub const SPARTAN_HURTBOX: Vec2 = Vec2::new(26.0, 54.0);
+pub const ARCHER_HURTBOX: Vec2 = Vec2::new(23.0, 49.0);
 
 const fn spartan_clips(stats: Stats) -> Clips {
     Clips {
@@ -116,6 +150,23 @@ const fn spartan_clips(stats: Stats) -> Clips {
 
 pub const PLAYER_CLIPS: Clips = spartan_clips(PLAYER_STATS);
 pub const ENEMY_STANDARD_CLIPS: Clips = spartan_clips(ENEMY_STANDARD_STATS);
+
+pub const ARCHER_CLIPS: Clips = Clips {
+    idle: AnimationClip::still(0),
+    walk: AnimationClip::new(0, 24, 0.07),
+    airborne: AnimationClip::still(2),
+    attack: AnimationClip::once(
+        25,
+        49,
+        ARCHER_STATS.attack.total() / ARCHER_ANIMATION_FRAMES,
+    ),
+    // The archer cannot guard or cast; these are safe fallback poses required
+    // by the shared animation contract.
+    block: AnimationClip::still(0),
+    block_impact: AnimationClip::still(0),
+    cast: AnimationClip::still(0),
+    death: AnimationClip::once(0, 24, DEATH_DURATION / ARCHER_ANIMATION_FRAMES),
+};
 
 /// How long the player is committed to a shrine-granted cast.
 ///
@@ -253,6 +304,7 @@ pub struct CharacterKind {
     pub stats: Stats,
     pub max_health: f32,
     pub attack_damage: f32,
+    pub attack_style: AttackStyle,
     pub death_image: Handle<Image>,
     pub death_layout: Handle<TextureAtlasLayout>,
 }
@@ -262,6 +314,7 @@ pub struct CharacterKind {
 pub struct Kinds {
     pub player: CharacterKind,
     pub enemy_standard: CharacterKind,
+    pub archer: CharacterKind,
 }
 
 fn load_kinds(
@@ -285,6 +338,22 @@ fn load_kinds(
         None,
         None,
     ));
+    let archer_image = asset_server.load(ARCHER_SHEET);
+    let archer_layout = layouts.add(TextureAtlasLayout::from_grid(
+        ARCHER_FRAME,
+        ARCHER_COLUMNS,
+        ARCHER_ROWS,
+        None,
+        None,
+    ));
+    let archer_death_image = asset_server.load(ARCHER_DEATH_SHEET);
+    let archer_death_layout = layouts.add(TextureAtlasLayout::from_grid(
+        ARCHER_DEATH_FRAME,
+        ARCHER_DEATH_COLUMNS,
+        ARCHER_DEATH_ROWS,
+        None,
+        None,
+    ));
 
     let kind = |clips, stats, max_health, attack_damage| CharacterKind {
         image: image.clone(),
@@ -296,6 +365,7 @@ fn load_kinds(
         stats,
         max_health,
         attack_damage,
+        attack_style: AttackStyle::Melee,
         death_image: death_image.clone(),
         death_layout: death_layout.clone(),
     };
@@ -313,6 +383,24 @@ fn load_kinds(
             ENEMY_STANDARD_MAX_HEALTH,
             ENEMY_STANDARD_ATTACK_DAMAGE,
         ),
+        archer: CharacterKind {
+            image: archer_image,
+            layout: archer_layout,
+            clips: ARCHER_CLIPS,
+            reach: Reach {
+                size: Vec2::ZERO,
+                forward: 0.0,
+                vertical: 0.0,
+            },
+            hurtbox: ARCHER_HURTBOX,
+            body: ARCHER_BODY,
+            stats: ARCHER_STATS,
+            max_health: ARCHER_MAX_HEALTH,
+            attack_damage: ARCHER_ATTACK_DAMAGE,
+            attack_style: AttackStyle::Ranged,
+            death_image: archer_death_image,
+            death_layout: archer_death_layout,
+        },
     });
 }
 
@@ -347,6 +435,14 @@ pub struct Intent {
     pub block_held: bool,
 }
 
+/// Whether the shared attack state creates a local hitbox or lets an enemy
+/// controller loose a projectile during its active window.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AttackStyle {
+    Melee,
+    Ranged,
+}
+
 /// Present only while a thrust is in progress. It carries its own schedule, so
 /// the attack stays authoritative over the animation rather than the reverse —
 /// and so fighters with different timings can swing side by side.
@@ -358,7 +454,7 @@ pub struct Attacking {
 }
 
 impl Attacking {
-    fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.elapsed >= self.timing.startup
             && self.elapsed < self.timing.startup + self.timing.active
     }
@@ -463,6 +559,7 @@ pub fn spawn_character(
                 kind.reach,
                 kind.body,
                 kind.stats,
+                kind.attack_style,
             ),
             // Current animation state, seeded from the blueprint's clips.
             (kind.clips.idle, AnimationTimer::from_clip(&kind.clips.walk)),
@@ -538,13 +635,16 @@ fn start_attack(
 fn tick_attack(
     mut commands: Commands,
     time: Res<Time>,
-    mut query: Query<(Entity, &mut Attacking, &Facing, &Reach), With<Character>>,
+    mut query: Query<
+        (Entity, &mut Attacking, &Facing, &Reach, &AttackStyle),
+        With<Character>,
+    >,
 ) {
-    for (entity, mut attack, facing, reach) in &mut query {
+    for (entity, mut attack, facing, reach, style) in &mut query {
         attack.elapsed += time.delta_secs();
 
-        match (attack.is_active(), attack.hitbox) {
-            (true, None) => {
+        match (style, attack.is_active(), attack.hitbox) {
+            (AttackStyle::Melee, true, None) => {
                 let hitbox = commands
                     .spawn((
                         Name::new("Attack Hitbox"),
@@ -556,7 +656,7 @@ fn tick_attack(
                     .id();
                 attack.hitbox = Some(hitbox);
             }
-            (false, Some(hitbox)) => {
+            (_, false, Some(hitbox)) => {
                 commands.entity(hitbox).despawn();
                 attack.hitbox = None;
             }

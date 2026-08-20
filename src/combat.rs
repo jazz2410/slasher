@@ -177,12 +177,12 @@ impl Hurt {
     }
 
     /// Took it on the body.
-    fn wounded() -> Self {
+    pub(crate) fn wounded() -> Self {
         Self::of(HURT_DURATION, false)
     }
 
     /// Took it on the shield.
-    fn guarded() -> Self {
+    pub(crate) fn guarded() -> Self {
         Self::of(BLOCKED_DURATION, true)
     }
 
@@ -223,7 +223,7 @@ pub fn guard_against(guard: Option<&Blocking>, facing_the_blow: bool) -> Guard {
 }
 
 impl Guard {
-    fn damage(self, attack_damage: f32) -> f32 {
+    pub(crate) fn damage(self, attack_damage: f32) -> f32 {
         match self {
             Guard::Open => attack_damage,
             Guard::Stale => CHIP_DAMAGE,
@@ -231,7 +231,7 @@ impl Guard {
         }
     }
 
-    fn knockback(self) -> f32 {
+    pub(crate) fn knockback(self) -> f32 {
         match self {
             Guard::Open => KNOCKBACK_SPEED,
             _ => BLOCKED_KNOCKBACK,

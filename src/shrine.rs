@@ -58,7 +58,8 @@ const ARROW_SIZE: Vec2 = Vec2::new(46.0, 10.0);
 const ARROW_OFFSET: Vec2 = Vec2::new(34.0, 6.0);
 
 const SHRINE_SPRITE_PATH: &str = "levels/FireShrine.png";
-const SHRINE_SIZE: Vec2 = Vec2::new(96.0, 96.0);
+/// Small enough to sit cleanly on Level_1's 56px-wide platform.
+const SHRINE_SIZE: Vec2 = Vec2::new(48.0, 48.0);
 #[cfg(test)]
 const SHRINE_DORMANT: Color = Color::srgb(0.353, 0.310, 0.271);
 const SHRINE_BLESSED: Color = Color::srgb(0.847, 0.698, 0.404);

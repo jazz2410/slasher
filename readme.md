@@ -48,9 +48,10 @@ in `Kinds`.
 
 The enemy is tinted cold to tell the two apart.
 
-The player and `EnemyStandard` currently each carry 100 health and deal 25
-damage, but those values live in separate profiles so either can be tuned
-without changing the other.
+The player, `EnemyStandard`, and `Archer` currently each carry 100 health and
+deal 25 damage, but those values live in separate profiles so any of them can
+be tuned without changing the others. The archer keeps his distance and looses
+blockable arrows instead of creating a melee hitbox.
 
 | Guard | Health | What happens |
 | --- | --- | --- |
@@ -145,12 +146,13 @@ clicking a level clears the current run and rebuilds it from that level.
 | Main `IntGrid` | Collision. `1` Solid, `2` Platform (one-way), `3` Hazard |
 | Additional IntGrid | Every occupied cell is a finer one-way platform. |
 | Tiles / AutoLayer | The art. Drawn exactly as painted. |
-| Entities | `PlayerSpawn`, `EnemyStandardSpawn`, `FireShrine` |
+| Entities | `PlayerSpawn`, `EnemyStandardSpawn`, `Archer`, `FireShrine` |
 
 A level with no painted tiles falls back to deriving terrain from its collision,
 so blocked-out geometry is visible before any art is placed. A level with no
-`PlayerSpawn` puts the player on the first bit of ground it can find. Standard
-enemies spawn only from `EnemyStandardSpawn` entities; no marker means no enemy.
+`PlayerSpawn` puts the player on the first bit of ground it can find. Melee
+enemies spawn from `EnemyStandardSpawn`; ranged enemies spawn from `Archer`.
+No marker means no enemy.
 
 Paint collision first and let auto-rules derive the terrain art: you draw the
 level's *shape* and the tiles follow.
@@ -259,6 +261,29 @@ otherwise not fit.
 `tools/process_sprite.py` is the older, heavier tool: it rescues art off an
 opaque backdrop with no usable grid, keying out the background and re-anchoring
 each frame. Use it only when a source is not already game-ready.
+
+The archer uses `archer_combat.png`: five rows of walking followed by five rows
+of shooting, for 50 frames in 108x66 cells. His 25 death frames remain in the
+separate 108x96 `archer_dies_game.png` atlas. Rebuild those derived files with:
+
+```sh
+python3 tools/process_sprite.py assets/sprites/archer_walk.png \
+    --out assets/sprites/archer_walk_game.png --frames-per-row 5 \
+    --cell-width 108 --cell-height 66 --target-height 54 --baseline-from-top 60
+python3 tools/process_sprite.py assets/sprites/archer_shoot.png \
+    --out assets/sprites/archer_shoot_game.png --frames-per-row 5 \
+    --cell-width 108 --cell-height 66 --target-height 54 --baseline-from-top 60
+python3 tools/process_sprite.py assets/sprites/archer_dies.png \
+    --out assets/sprites/archer_dies_game.png --frames-per-row 5 \
+    --cell-width 108 --cell-height 96 --target-height 49 \
+    --baseline-from-top 75 --prone-anchor-ratio 0.63
+python3 tools/build_archer_sheet.py
+python3 tools/import_weapon.py assets/sprites/arrow.png \
+    --out archer_arrow.png --length 40
+```
+
+The last command removes the source arrow's black canvas and writes the
+transparent projectile used in game to `assets/weapons/archer_arrow.png`.
 
 **There is currently no block animation.** `Clips::block` borrows the thrust's
 opening frame as a stand-in; blocking works mechanically, but it looks like a

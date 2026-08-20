@@ -24,6 +24,16 @@ def main():
     args = ap.parse_args()
 
     src = Image.open(args.source).convert("RGBA")
+    # Some generated PNGs declare an alpha channel but fill it completely,
+    # leaving the weapon on an opaque black canvas. Key that canvas out before
+    # trimming. The tiny threshold also absorbs near-black resampling noise at
+    # the edge without eating the weapon's dark outline.
+    if src.getchannel("A").getextrema() == (255, 255):
+        rgb = src.convert("RGB")
+        alpha = Image.new("L", src.size)
+        alpha.putdata([255 if max(pixel) > 4 else 0 for pixel in rgb.getdata()])
+        src.putalpha(alpha)
+
     box = src.getbbox()
     if box is None:
         raise SystemExit(f"{args.source} is entirely transparent")
