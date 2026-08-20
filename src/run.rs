@@ -41,6 +41,7 @@ impl Plugin for RunPlugin {
                     .run_if(in_state(Run::Playing))
                     .after(CombatSet::Death),
             )
+            .add_systems(OnEnter(Run::Reloading), finish_reload)
             .add_systems(OnEnter(Run::Ended), start_the_clock)
             .add_systems(Update, tick_restart.run_if(in_state(Run::Ended)));
     }
@@ -48,15 +49,16 @@ impl Plugin for RunPlugin {
 
 /// Where a run is.
 ///
-/// Deliberately only two states. Everything a level needs to *begin* hangs off
-/// entering `Playing`, so adding level transitions later means changing which
-/// level is loaded, not adding more states.
+/// Everything a level needs to begin hangs off entering `Playing`; the short
+/// `Reloading` hop exists only to leave that state, clear its scoped entities,
+/// and enter it again with a newly selected level.
 #[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Run {
     /// Nothing has spawned yet; the level and blueprints are still being read.
     #[default]
     Loading,
     Playing,
+    Reloading,
     /// The player is down. The board is cleared and a short clock runs.
     Ended,
 }
@@ -73,6 +75,10 @@ pub fn run_scoped() -> RunScoped {
 struct RestartClock(Timer);
 
 fn begin(mut next: ResMut<NextState<Run>>) {
+    next.set(Run::Playing);
+}
+
+fn finish_reload(mut next: ResMut<NextState<Run>>) {
     next.set(Run::Playing);
 }
 

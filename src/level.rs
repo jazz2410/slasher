@@ -57,7 +57,7 @@ pub struct LevelPlugin;
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         // PreStartup so the grid and spawn points exist before anything spawns.
-        app.add_systems(PreStartup, load_level)
+        app.add_systems(PreStartup, load_levels)
             .add_systems(OnEnter(Run::Playing), (draw_background, draw_tiles));
     }
 }
@@ -106,6 +106,31 @@ struct RawLayer {
     /// Tiles LDtk's auto-rules produced. Already resolved in the saved file.
     #[serde(default, rename = "autoLayerTiles")]
     auto_tiles: Vec<RawTile>,
+}
+
+/// Pick the IntGrid that represents gameplay collision.
+///
+/// LDtk allows several IntGrid layers. The project uses an 8px helper layer
+/// named `SmallIntgrid` alongside the 16px collision layer named `IntGrid`, so
+/// taking the first layer by type can leave the game with an empty floor. Keep
+/// the conventional collision name authoritative; for projects that rename
+/// it, fall back to the grid containing the most painted collision cells.
+fn collision_layer(layers: &[RawLayer]) -> Option<&RawLayer> {
+    layers
+        .iter()
+        .find(|layer| layer.kind == "IntGrid" && layer.identifier == "IntGrid")
+        .or_else(|| {
+            layers
+                .iter()
+                .filter(|layer| layer.kind == "IntGrid")
+                .max_by_key(|layer| {
+                    layer
+                        .int_grid
+                        .iter()
+                        .filter(|&&value| value != EMPTY)
+                        .count()
+                })
+        })
 }
 
 #[derive(Deserialize)]
@@ -176,13 +201,14 @@ fn asset_path(project: &std::path::Path, relative: &str) -> Option<String> {
 // --- what the game actually uses --------------------------------------------
 
 /// A named place something should be spawned, already in world coordinates.
+#[derive(Clone)]
 pub struct SpawnPoint {
     pub identifier: String,
     pub at: Vec2,
 }
 
 /// The loaded level: its collision grid and its spawn points.
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct Level {
     pub name: String,
     width: usize,
@@ -191,6 +217,10 @@ pub struct Level {
     /// World position of the level's bottom-left corner.
     origin: Vec2,
     cells: Vec<u8>,
+    /// Additional, finer IntGrid layers are treated as one-way platforms.
+    /// They retain their own grid size instead of being rounded onto the main
+    /// collision grid.
+    one_way_grids: Vec<OneWayGrid>,
     pub spawns: Vec<SpawnPoint>,
     /// Tiles painted in LDtk, already in world space. When this is non-empty it
     /// is what gets drawn; the nine-slice derivation is only for a level whose
@@ -202,11 +232,111 @@ pub struct Level {
     background: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct PaintedTile {
     pub centre: Vec2,
     pub index: usize,
     pub flip_x: bool,
     pub flip_y: bool,
+}
+
+/// An auxiliary LDtk IntGrid whose occupied cells are jump-through platforms.
+/// Keeping this separate lets an 8px ledge coexist with a 16px world grid.
+#[derive(Clone)]
+struct OneWayGrid {
+    width: usize,
+    height: usize,
+    tile: f32,
+    origin: Vec2,
+    cells: Vec<u8>,
+}
+
+impl OneWayGrid {
+    fn value(&self, cx: isize, cy: isize) -> u8 {
+        if cx < 0 || cx >= self.width as isize || cy < 0 || cy >= self.height as isize {
+            return EMPTY;
+        }
+        self.cells[cy as usize * self.width + cx as usize]
+    }
+
+    fn cell_corner(&self, cx: isize, cy: isize) -> Vec2 {
+        self.origin
+            + Vec2::new(
+                cx as f32 * self.tile,
+                (self.height as isize - 1 - cy) as f32 * self.tile,
+            )
+    }
+
+    fn cells_over(&self, min: Vec2, max: Vec2) -> (isize, isize, isize, isize) {
+        let local_min = min - self.origin;
+        let local_max = max - self.origin;
+        let top = self.height as f32 * self.tile;
+        (
+            (local_min.x / self.tile).floor() as isize,
+            ((local_max.x - f32::EPSILON) / self.tile).floor() as isize,
+            ((top - local_max.y) / self.tile).floor() as isize,
+            ((top - local_min.y - f32::EPSILON) / self.tile).floor() as isize,
+        )
+    }
+
+    /// Highest platform top crossed by the body's feet this frame.
+    fn landing_top(&self, centre: Vec2, half: Vec2, previous_bottom: f32) -> Option<f32> {
+        let probe = Vec2::new(half.x - SKIN, half.y);
+        let current_bottom = centre.y - half.y;
+        let (x0, x1, y0, y1) = self.cells_over(centre - probe, centre + probe);
+        let mut landing: Option<f32> = None;
+
+        for cy in y0..=y1 {
+            for cx in x0..=x1 {
+                if self.value(cx, cy) == EMPTY {
+                    continue;
+                }
+                let top = self.cell_corner(cx, cy).y + self.tile;
+                if previous_bottom >= top - 0.001 && current_bottom <= top {
+                    landing = Some(landing.map_or(top, |current| current.max(top)));
+                }
+            }
+        }
+        landing
+    }
+}
+
+/// Every level found in the LDtk project and which one is currently active.
+/// The active [`Level`] is also installed as its own resource because all
+/// gameplay systems already consume that directly.
+#[derive(Resource)]
+pub struct LevelCatalog {
+    levels: Vec<Level>,
+    selected: usize,
+}
+
+impl LevelCatalog {
+    pub fn levels(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.levels
+            .iter()
+            .enumerate()
+            .map(|(index, level)| (index, level.name.as_str()))
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    /// Select and clone a level into the standalone runtime resource.
+    pub fn select(&mut self, index: usize) -> Option<Level> {
+        let level = self.levels.get(index)?.clone();
+        self.selected = index;
+        Some(level)
+    }
+
+    #[cfg(test)]
+    pub fn for_test(levels: Vec<Level>) -> Self {
+        assert!(!levels.is_empty());
+        Self {
+            levels,
+            selected: 0,
+        }
+    }
 }
 
 impl Level {
@@ -299,6 +429,7 @@ impl Level {
             tile,
             origin: Vec2::splat(-(CELLS as f32) * tile / 2.0),
             cells,
+            one_way_grids: Vec::new(),
             spawns,
             painted: Vec::new(),
             background: None,
@@ -416,6 +547,21 @@ impl Level {
                 return true;
             }
         }
+
+        // Auxiliary grids represent thin ledges: pass through while rising,
+        // but catch feet that cross their top edge while falling.
+        if *velocity_y <= 0.0 {
+            let landing = self
+                .one_way_grids
+                .iter()
+                .filter_map(|grid| grid.landing_top(*centre, half, previous_bottom))
+                .max_by(f32::total_cmp);
+            if let Some(top) = landing {
+                centre.y = top + half.y;
+                *velocity_y = 0.0;
+                return true;
+            }
+        }
         false
     }
 }
@@ -447,6 +593,7 @@ mod tests {
                     _ => EMPTY,
                 })
                 .collect(),
+            one_way_grids: Vec::new(),
             spawns: Vec::new(),
             painted: Vec::new(),
             background: None,
@@ -466,6 +613,50 @@ mod tests {
         );
         // Anything that climbs out of `assets/` cannot be served.
         assert_eq!(asset_path(project, "../../outside.png"), None);
+    }
+
+    #[test]
+    fn catalog_selection_returns_the_chosen_level() {
+        let mut first = level(&[".", "#"]);
+        first.name = "Level_0".into();
+        let mut second = level(&[".", "#"]);
+        second.name = "Level_1".into();
+        let mut catalog = LevelCatalog {
+            levels: vec![first, second],
+            selected: 0,
+        };
+
+        assert_eq!(
+            catalog.levels().collect::<Vec<_>>(),
+            vec![(0, "Level_0"), (1, "Level_1")]
+        );
+        let chosen = catalog.select(1).unwrap();
+        assert_eq!(chosen.name, "Level_1");
+        assert_eq!(catalog.selected(), 1);
+    }
+
+    #[test]
+    fn named_collision_grid_wins_over_an_earlier_empty_helper_grid() {
+        let layer = |identifier: &str, grid_size: i32, cells: Vec<u8>| RawLayer {
+            identifier: identifier.into(),
+            kind: "IntGrid".into(),
+            c_wid: 2,
+            c_hei: 2,
+            grid_size,
+            int_grid: cells,
+            entities: Vec::new(),
+            grid_tiles: Vec::new(),
+            auto_tiles: Vec::new(),
+        };
+        let layers = vec![
+            layer("SmallIntgrid", 8, vec![EMPTY; 4]),
+            layer("IntGrid", 16, vec![EMPTY, EMPTY, SOLID, SOLID]),
+        ];
+
+        let selected = collision_layer(&layers).unwrap();
+        assert_eq!(selected.identifier, "IntGrid");
+        assert_eq!(selected.grid_size, 16);
+        assert_eq!(selected.int_grid, vec![EMPTY, EMPTY, SOLID, SOLID]);
     }
 
     /// A spawn marker must land on the ground whichever pivot its definition
@@ -573,6 +764,33 @@ mod tests {
         assert!(!grounded, "a platform must not catch a body already beneath it");
     }
 
+    #[test]
+    fn a_finer_auxiliary_grid_provides_one_way_platforms() {
+        let mut level = level(&["......", "......", "......", "......", "......", "......"]);
+        let mut cells = vec![EMPTY; 12 * 12];
+        // On an 8px grid, row 6 has its top at y=48.
+        for cx in 0..12 {
+            cells[6 * 12 + cx] = SOLID;
+        }
+        level.one_way_grids.push(OneWayGrid {
+            width: 12,
+            height: 12,
+            tile: 8.0,
+            origin: Vec2::ZERO,
+            cells,
+        });
+
+        let mut falling = Vec2::new(24.0, 46.0 + HALF.y);
+        let mut fall_speed = -200.0;
+        assert!(level.resolve_vertical(&mut falling, HALF, &mut fall_speed, 52.0));
+        assert_eq!(falling.y, 48.0 + HALF.y);
+
+        let mut rising = Vec2::new(24.0, 46.0 + HALF.y);
+        let mut rise_speed = 200.0;
+        assert!(!level.resolve_vertical(&mut rising, HALF, &mut rise_speed, 40.0));
+        assert_eq!(rise_speed, 200.0);
+    }
+
     /// Walking across flat ground must be uneventful. The body rests with its
     /// feet exactly on a tile's top edge, which is the boundary case for
     /// `cells_over` — if that range includes the floor cell, horizontal
@@ -630,7 +848,7 @@ fn find_project() -> Option<std::path::PathBuf> {
     found.into_iter().next()
 }
 
-fn load_level(mut commands: Commands) {
+fn load_levels(mut commands: Commands) {
     let Some(path) = find_project() else {
         warn!("no .ldtk in {LEVELS_DIR}; falling back to flat ground");
         return;
@@ -649,15 +867,36 @@ fn load_level(mut commands: Commands) {
             return;
         }
     };
-    let Some(raw) = project.levels.into_iter().next() else {
+    let levels: Vec<Level> = project
+        .levels
+        .into_iter()
+        .filter_map(|raw| build_level(raw, &path))
+        .collect();
+    let Some(level) = levels.first().cloned() else {
         error!("{} contains no levels", path.display());
         return;
     };
 
-    // By type, not by name — the layer can be called anything.
-    let Some(collision) = raw.layers.iter().find(|l| l.kind == "IntGrid") else {
-        error!("{} has no IntGrid layer to take collision from", path.display());
-        return;
+    info!(
+        "LDtk catalog: {} level(s), starting with '{}'",
+        levels.len(),
+        level.name
+    );
+    commands.insert_resource(LevelCatalog {
+        levels,
+        selected: 0,
+    });
+    commands.insert_resource(level);
+}
+
+fn build_level(raw: RawLevel, path: &std::path::Path) -> Option<Level> {
+    let Some(collision) = collision_layer(&raw.layers) else {
+        error!(
+            "level '{}' in {} has no IntGrid layer to take collision from",
+            raw.identifier,
+            path.display()
+        );
+        return None;
     };
     let (width, height) = (collision.c_wid as usize, collision.c_hei as usize);
     if collision.int_grid.len() != width * height {
@@ -666,8 +905,39 @@ fn load_level(mut commands: Commands) {
             collision.identifier,
             collision.int_grid.len()
         );
-        return;
+        return None;
     }
+
+    let one_way_grids: Vec<OneWayGrid> = raw
+        .layers
+        .iter()
+        .filter(|layer| layer.kind == "IntGrid" && !std::ptr::eq(*layer, collision))
+        .filter_map(|layer| {
+            let width = layer.c_wid as usize;
+            let height = layer.c_hei as usize;
+            if layer.int_grid.len() != width * height {
+                warn!(
+                    "ignoring auxiliary IntGrid '{}' in level '{}': {} cells but {width}x{height}",
+                    layer.identifier,
+                    raw.identifier,
+                    layer.int_grid.len()
+                );
+                return None;
+            }
+            Some(OneWayGrid {
+                width,
+                height,
+                tile: layer.grid_size as f32,
+                origin: Vec2::new(0.0, GROUND_Y),
+                cells: layer.int_grid.clone(),
+            })
+        })
+        .collect();
+    let one_way_cells = one_way_grids
+        .iter()
+        .flat_map(|grid| grid.cells.iter())
+        .filter(|&&value| value != EMPTY)
+        .count();
 
     let mut level = Level {
         name: raw.identifier,
@@ -676,12 +946,13 @@ fn load_level(mut commands: Commands) {
         tile: collision.grid_size as f32,
         origin: Vec2::new(0.0, GROUND_Y),
         cells: collision.int_grid.clone(),
+        one_way_grids,
         spawns: Vec::new(),
         painted: Vec::new(),
         background: raw
             .bg_rel_path
             .as_deref()
-            .and_then(|rel| asset_path(&path, rel)),
+            .and_then(|rel| asset_path(path, rel)),
     };
 
     level.spawns = raw
@@ -717,6 +988,7 @@ fn load_level(mut commands: Commands) {
     let platform = level.cells.iter().filter(|&&v| v == PLATFORM).count();
     info!(
         "level '{}' from {}: {}x{} tiles ({}px), {solid} solid, {platform} platform, \
+         {one_way_cells} auxiliary platform cells, \
          {} painted tiles, {} spawns",
         level.name,
         path.display(),
@@ -729,7 +1001,7 @@ fn load_level(mut commands: Commands) {
     debug_assert_eq!(raw.px_wid as usize, width * collision.grid_size as usize);
     debug_assert_eq!(raw.px_hei as usize, height * collision.grid_size as usize);
 
-    commands.insert_resource(level);
+    Some(level)
 }
 
 impl Level {

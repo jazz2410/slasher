@@ -12,7 +12,7 @@ use bevy::prelude::*;
 
 use crate::animation::{play, AnimationClip, AnimationTimer};
 use crate::combat::{
-    spawn_health_bar, AttackHitbox, CombatSet, Health, Hurt, Hurtbox, MAX_HEALTH,
+    spawn_health_bar, AttackDamage, AttackHitbox, CombatSet, Health, Hurt, Hurtbox,
 };
 use crate::level::Level;
 use crate::run::run_scoped;
@@ -48,10 +48,28 @@ const SPARTAN_ATTACK_FRAMES: f32 = 15.0;
 const SPARTAN_CAST_FRAMES: f32 = 25.0;
 const SPARTAN_DEATH_FRAMES: f32 = 25.0;
 
-pub const SPARTAN_STATS: Stats = Stats {
+pub const PLAYER_MAX_HEALTH: f32 = 100.0;
+pub const PLAYER_ATTACK_DAMAGE: f32 = 25.0;
+pub const ENEMY_STANDARD_MAX_HEALTH: f32 = 100.0;
+pub const ENEMY_STANDARD_ATTACK_DAMAGE: f32 = 25.0;
+
+pub const PLAYER_STATS: Stats = Stats {
     run_speed: 160.0,
     jump_speed: 420.0,
     // Modest forward drive so the thrust travels instead of rooting in place.
+    lunge_speed: 90.0,
+    attack: AttackTiming {
+        startup: 0.09,
+        active: 0.10,
+        recovery: 0.13,
+    },
+};
+
+/// Kept separate even while the numbers match, so tuning this enemy never
+/// changes the player by accident.
+pub const ENEMY_STANDARD_STATS: Stats = Stats {
+    run_speed: 160.0,
+    jump_speed: 420.0,
     lunge_speed: 90.0,
     attack: AttackTiming {
         startup: 0.09,
@@ -78,25 +96,26 @@ pub const SPARTAN_REACH: Reach = Reach {
 /// The body itself — narrower than a cell, since the cell is mostly reach.
 pub const SPARTAN_HURTBOX: Vec2 = Vec2::new(26.0, 54.0);
 
-pub const SPARTAN_CLIPS: Clips = Clips {
-    idle: AnimationClip::still(0),
-    walk: AnimationClip::new(0, 4, 0.09),
-    airborne: AnimationClip::still(2),
-    // Frame time derived from the attack's real duration, so the animation can
-    // never drift out of sync with the hitbox timing.
-    attack: AnimationClip::new(5, 19, SPARTAN_STATS.attack.total() / SPARTAN_ATTACK_FRAMES),
-    // Stand-in. The current art has no dedicated guard, so this borrows the
-    // thrust's opening frame — shield forward, spear braced — which at least
-    // reads differently from idle. Replace when a block row exists.
-    block: AnimationClip::still(5),
-    // Likewise: without spark frames, the gold flash in `combat` is what tells
-    // you the hit was turned aside.
-    block_impact: AnimationClip::still(5),
-    // Rows 4-8: fire gathers in his hands, then jets forward.
-    cast: AnimationClip::new(20, 44, CAST_DURATION / SPARTAN_CAST_FRAMES),
-    // A separate atlas is selected while dying, so its indices begin at zero.
-    death: AnimationClip::once(0, 24, DEATH_DURATION / SPARTAN_DEATH_FRAMES),
-};
+const fn spartan_clips(stats: Stats) -> Clips {
+    Clips {
+        idle: AnimationClip::still(0),
+        walk: AnimationClip::new(0, 4, 0.09),
+        airborne: AnimationClip::still(2),
+        // Match the visual thrust to this blueprint's own attack timing.
+        attack: AnimationClip::new(
+            5,
+            19,
+            stats.attack.total() / SPARTAN_ATTACK_FRAMES,
+        ),
+        block: AnimationClip::still(5),
+        block_impact: AnimationClip::still(5),
+        cast: AnimationClip::new(20, 44, CAST_DURATION / SPARTAN_CAST_FRAMES),
+        death: AnimationClip::once(0, 24, DEATH_DURATION / SPARTAN_DEATH_FRAMES),
+    }
+}
+
+pub const PLAYER_CLIPS: Clips = spartan_clips(PLAYER_STATS);
+pub const ENEMY_STANDARD_CLIPS: Clips = spartan_clips(ENEMY_STANDARD_STATS);
 
 /// How long the player is committed to a shrine-granted cast.
 ///
@@ -232,6 +251,8 @@ pub struct CharacterKind {
     pub hurtbox: Vec2,
     pub body: Body,
     pub stats: Stats,
+    pub max_health: f32,
+    pub attack_damage: f32,
     pub death_image: Handle<Image>,
     pub death_layout: Handle<TextureAtlasLayout>,
 }
@@ -239,7 +260,8 @@ pub struct CharacterKind {
 /// Every blueprint the game knows about. Add a field per new fighter.
 #[derive(Resource)]
 pub struct Kinds {
-    pub spartan: CharacterKind,
+    pub player: CharacterKind,
+    pub enemy_standard: CharacterKind,
 }
 
 fn load_kinds(
@@ -247,30 +269,50 @@ fn load_kinds(
     asset_server: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
+    let image = asset_server.load(SPARTAN_SHEET);
+    let layout = layouts.add(TextureAtlasLayout::from_grid(
+        SPARTAN_FRAME,
+        SPARTAN_COLUMNS,
+        SPARTAN_ROWS,
+        None,
+        None,
+    ));
+    let death_image = asset_server.load(SPARTAN_DEATH_SHEET);
+    let death_layout = layouts.add(TextureAtlasLayout::from_grid(
+        SPARTAN_DEATH_FRAME,
+        SPARTAN_DEATH_COLUMNS,
+        SPARTAN_DEATH_ROWS,
+        None,
+        None,
+    ));
+
+    let kind = |clips, stats, max_health, attack_damage| CharacterKind {
+        image: image.clone(),
+        layout: layout.clone(),
+        clips,
+        reach: SPARTAN_REACH,
+        hurtbox: SPARTAN_HURTBOX,
+        body: SPARTAN_BODY,
+        stats,
+        max_health,
+        attack_damage,
+        death_image: death_image.clone(),
+        death_layout: death_layout.clone(),
+    };
+
     commands.insert_resource(Kinds {
-        spartan: CharacterKind {
-            image: asset_server.load(SPARTAN_SHEET),
-            layout: layouts.add(TextureAtlasLayout::from_grid(
-                SPARTAN_FRAME,
-                SPARTAN_COLUMNS,
-                SPARTAN_ROWS,
-                None,
-                None,
-            )),
-            clips: SPARTAN_CLIPS,
-            reach: SPARTAN_REACH,
-            hurtbox: SPARTAN_HURTBOX,
-            body: SPARTAN_BODY,
-            stats: SPARTAN_STATS,
-            death_image: asset_server.load(SPARTAN_DEATH_SHEET),
-            death_layout: layouts.add(TextureAtlasLayout::from_grid(
-                SPARTAN_DEATH_FRAME,
-                SPARTAN_DEATH_COLUMNS,
-                SPARTAN_DEATH_ROWS,
-                None,
-                None,
-            )),
-        },
+        player: kind(
+            PLAYER_CLIPS,
+            PLAYER_STATS,
+            PLAYER_MAX_HEALTH,
+            PLAYER_ATTACK_DAMAGE,
+        ),
+        enemy_standard: kind(
+            ENEMY_STANDARD_CLIPS,
+            ENEMY_STANDARD_STATS,
+            ENEMY_STANDARD_MAX_HEALTH,
+            ENEMY_STANDARD_ATTACK_DAMAGE,
+        ),
     });
 }
 
@@ -424,7 +466,8 @@ pub fn spawn_character(
             ),
             // Current animation state, seeded from the blueprint's clips.
             (kind.clips.idle, AnimationTimer::from_clip(&kind.clips.walk)),
-            Health::full(MAX_HEALTH),
+            Health::full(kind.max_health),
+            AttackDamage(kind.attack_damage),
             run_scoped(),
         ))
         .id();

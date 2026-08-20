@@ -48,8 +48,9 @@ in `Kinds`.
 
 The enemy is tinted cold to tell the two apart.
 
-Every fighter carries 100 health and a small floating bar, and a spear thrust
-costs 25 — so a duel runs four clean hits.
+The player and `EnemyStandard` currently each carry 100 health and deal 25
+damage, but those values live in separate profiles so either can be tuned
+without changing the other.
 
 | Guard | Health | What happens |
 | --- | --- | --- |
@@ -63,8 +64,9 @@ down and the guard goes stale — it still turns the blade, but the shock gets
 through. Without that decay, turtling would be the correct answer to every
 attack, which is the same as having no fight at all.
 
-At zero health an enemy is despawned. When the **player** dies the level
-restarts: after a 0.8s pause everything the run owns is cleared and rebuilt.
+At zero health an enemy holds the final death frame as a harmless corpse. When
+the **player** dies the level restarts: after a 0.8s pause everything the run
+owns is cleared and rebuilt.
 
 The shield only covers the side you face, so turning your back means eating the
 thrust. One thrust can strike a given target only once, however many frames its
@@ -78,7 +80,7 @@ state the button does nothing.
 
 | Source | Charge |
 | --- | --- |
-| `Shrine` entity, prayed at with `E` | **Single** — loosing the arrow ends the state |
+| `FireShrine` entity, prayed at with `E` | **Single** — loosing the arrow ends the state |
 | `EternalFlame` entity anywhere in the level | **Endless** — never spent, 2.5s cooldown |
 
 So a shrine is one arrow: spend it and you must find another shrine. A level
@@ -103,6 +105,7 @@ placing shrines is editor work with no code change.
 | [src/enemy.rs](src/enemy.rs) | AI into `Intent` |
 | [src/combat.rs](src/combat.rs) | Hit resolution, guards, health, knockback |
 | [src/run.rs](src/run.rs) | Playing / dying / restarting a level |
+| [src/dev_menu.rs](src/dev_menu.rs) | F1 developer level picker |
 | [src/shrine.rs](src/shrine.rs) | Shrine, blessing, fire arrow |
 | [src/animation.rs](src/animation.rs) | Reusable spritesheet animation driver |
 | [src/camera.rs](src/camera.rs) | Follow camera with fixed vertical framing |
@@ -131,18 +134,23 @@ default of `Playing` would fire `OnEnter` before the level and blueprints exist.
 ## Levels
 
 Levels are authored in [LDtk](https://ldtk.io) (free desktop editor, 1.5.3).
-The game loads the first `.ldtk` in `assets/levels`, and finds its layers by
-**type**, not by name — so call them whatever you like:
+The game loads every level from the first `.ldtk` in `assets/levels` and starts
+on the first one. Name the main 16px collision layer `IntGrid`; additional
+IntGrid layers such as the 8px `SmallIntgrid` are imported as one-way platforms.
+Press **F1** in game to pause and open the developer level picker;
+clicking a level clears the current run and rebuilds it from that level.
 
 | Layer type | Purpose |
 | --- | --- |
-| IntGrid | Collision. `1` Solid, `2` Platform (one-way), `3` Hazard |
+| Main `IntGrid` | Collision. `1` Solid, `2` Platform (one-way), `3` Hazard |
+| Additional IntGrid | Every occupied cell is a finer one-way platform. |
 | Tiles / AutoLayer | The art. Drawn exactly as painted. |
-| Entities | `PlayerSpawn`, `Enemy`, `LevelExit`, `Torch` |
+| Entities | `PlayerSpawn`, `EnemyStandardSpawn`, `FireShrine` |
 
 A level with no painted tiles falls back to deriving terrain from its collision,
 so blocked-out geometry is visible before any art is placed. A level with no
-`PlayerSpawn` puts the player on the first bit of ground it can find.
+`PlayerSpawn` puts the player on the first bit of ground it can find. Standard
+enemies spawn only from `EnemyStandardSpawn` entities; no marker means no enemy.
 
 Paint collision first and let auto-rules derive the terrain art: you draw the
 level's *shape* and the tiles follow.
@@ -150,8 +158,8 @@ level's *shape* and the tiles follow.
 [src/level.rs](src/level.rs) reads the project directly with `serde_json` rather
 than pulling in a tilemap crate — LDtk bakes its *resolved* tile placements into
 the saved file, so there is nothing left for such a crate to compute. It builds
-a collision grid from the `Collision` IntGrid and spawn points from the
-`Entities` layer, and draws the tiles.
+the main collision grid plus any finer platform grids, reads spawn points from
+the `Entities` layer, and draws the tiles.
 
 Collision is axis-separated: move and resolve horizontally, then vertically.
 Doing both at once cannot tell a wall from a floor. With no level loaded — which
@@ -256,10 +264,8 @@ each frame. Use it only when a source is not already game-ready.
 opening frame as a stand-in; blocking works mechanically, but it looks like a
 wind-up rather than a guard.
 
-**`START_BLESSED` in [src/shrine.rs](src/shrine.rs) is on**, so every run begins
-able to cast — convenient for testing the fire blast without walking to a
-shrine. Turn it off once shrines are placed in levels. It is forced off under
-`cfg(test)` so it cannot invalidate the tests about *not* being blessed.
+**`START_BLESSED` in [src/shrine.rs](src/shrine.rs) is off.** Walk to the
+highlighted `FireShrine` and press `E` to receive one fire-spear cast.
 
 The world uses **1 unit = 1 source pixel**, and the camera is set to a fixed
 360-unit viewport height, so the game letterboxes consistently at any window

@@ -27,8 +27,10 @@ const HURT_FLASH: Color = Color::srgb(3.0, 0.6, 0.6);
 const BLOCK_FLASH: Color = Color::srgb(2.4, 2.2, 1.2);
 
 /// A spear thrust costs a quarter of a full bar, so a duel runs four hits.
-pub const SPEAR_DAMAGE: f32 = 25.0;
-pub const MAX_HEALTH: f32 = 100.0;
+#[cfg(test)]
+pub const SPEAR_DAMAGE: f32 = crate::character::PLAYER_ATTACK_DAMAGE;
+#[cfg(test)]
+pub const MAX_HEALTH: f32 = crate::character::PLAYER_MAX_HEALTH;
 
 /// How long after raising the shield a guard still counts as a parry.
 ///
@@ -111,6 +113,11 @@ impl Health {
 /// The draining part of a health bar. Its parent is the fighter it belongs to.
 #[derive(Component)]
 pub struct HealthBarFill;
+
+/// Damage belongs to the attacking character blueprint, allowing the player
+/// and every enemy type to be tuned independently.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct AttackDamage(pub f32);
 
 /// Attach a bar to a fighter. Two child sprites: a fixed dark backing and a
 /// fill that shrinks. Children of the character, so they follow it for free —
@@ -216,9 +223,9 @@ pub fn guard_against(guard: Option<&Blocking>, facing_the_blow: bool) -> Guard {
 }
 
 impl Guard {
-    fn damage(self) -> f32 {
+    fn damage(self, attack_damage: f32) -> f32 {
         match self {
-            Guard::Open => SPEAR_DAMAGE,
+            Guard::Open => attack_damage,
             Guard::Stale => CHIP_DAMAGE,
             Guard::Parried => 0.0,
         }
@@ -235,7 +242,7 @@ impl Guard {
 fn resolve_hits(
     mut commands: Commands,
     mut hitboxes: Query<&mut AttackHitbox>,
-    owners: Query<(&Transform, &Facing, &Reach), With<Character>>,
+    owners: Query<(&Transform, &Facing, &Reach, &AttackDamage), With<Character>>,
     mut targets: Query<
         (
             Entity,
@@ -250,7 +257,8 @@ fn resolve_hits(
     mut healths: Query<&mut Health>,
 ) {
     for mut hitbox in &mut hitboxes {
-        let Ok((owner_transform, owner_facing, reach)) = owners.get(hitbox.owner) else {
+        let Ok((owner_transform, owner_facing, reach, attack_damage)) = owners.get(hitbox.owner)
+        else {
             continue;
         };
 
@@ -285,7 +293,7 @@ fn resolve_hits(
                 Hurt::guarded()
             });
 
-            let damage = guard.damage();
+            let damage = guard.damage(attack_damage.0);
             if damage > 0.0 {
                 if let Ok(mut health) = healths.get_mut(target) {
                     health.current = (health.current - damage).max(0.0);
@@ -423,11 +431,11 @@ mod tests {
 
     #[test]
     fn each_outcome_costs_what_it_should() {
-        assert_eq!(Guard::Open.damage(), SPEAR_DAMAGE);
-        assert_eq!(Guard::Stale.damage(), CHIP_DAMAGE);
-        assert_eq!(Guard::Parried.damage(), 0.0);
+        assert_eq!(Guard::Open.damage(SPEAR_DAMAGE), SPEAR_DAMAGE);
+        assert_eq!(Guard::Stale.damage(SPEAR_DAMAGE), CHIP_DAMAGE);
+        assert_eq!(Guard::Parried.damage(SPEAR_DAMAGE), 0.0);
         assert!(
-            Guard::Stale.damage() < Guard::Open.damage(),
+            Guard::Stale.damage(SPEAR_DAMAGE) < Guard::Open.damage(SPEAR_DAMAGE),
             "a stale guard must still be better than none"
         );
     }

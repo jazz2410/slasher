@@ -24,22 +24,16 @@ use crate::level::Level;
 use crate::player::Player;
 use crate::run::{run_scoped, Run};
 
-/// LDtk entity name that marks where a shrine stands.
-const SHRINE_MARKER: &str = "Shrine";
+/// LDtk entity names accepted for a shrine. The old `FIreShrine` typo remains
+/// accepted so older levels do not silently lose their shrine.
+const SHRINE_MARKERS: [&str; 3] = ["FireShrine", "FIreShrine", "Shrine"];
 /// LDtk entity name that, placed anywhere in a level, leaves the player
 /// permanently able to cast. Position is irrelevant — its presence is the
 /// whole statement.
 const ETERNAL_MARKER: &str = "EternalFlame";
 
-/// Testing switch: begin every run already able to cast, so the animation can
-/// be exercised without walking to a shrine. Set to `false` once shrines are
-/// actually placed in levels.
-///
-/// Forced off under `cfg(test)`: leaving it on would hand every test a free
-/// blessing and quietly invalidate the ones about *not* having one.
-#[cfg(not(test))]
-const START_BLESSED: bool = true;
-#[cfg(test)]
+/// Development switch for testing the cast without a shrine. Now that the
+/// level contains a real FireShrine it stays off during normal play.
 const START_BLESSED: bool = false;
 
 /// How close the player must stand to hear the god.
@@ -63,10 +57,13 @@ const ARROW_SIZE: Vec2 = Vec2::new(46.0, 10.0);
 /// spear clears him.
 const ARROW_OFFSET: Vec2 = Vec2::new(34.0, 6.0);
 
-/// Placeholder art, in palette colours, until real sprites exist.
-const SHRINE_SIZE: Vec2 = Vec2::new(24.0, 40.0);
+const SHRINE_SPRITE_PATH: &str = "levels/FireShrine.png";
+const SHRINE_SIZE: Vec2 = Vec2::new(96.0, 96.0);
+#[cfg(test)]
 const SHRINE_DORMANT: Color = Color::srgb(0.353, 0.310, 0.271);
 const SHRINE_BLESSED: Color = Color::srgb(0.847, 0.698, 0.404);
+const SHRINE_SPENT: Color = Color::srgb(0.62, 0.56, 0.52);
+const HINT_Y: f32 = SHRINE_SIZE.y / 2.0 + 9.0;
 /// Only the tests draw an arrow as a flat colour now; the game uses the art.
 #[cfg(test)]
 const ARROW_COLOUR: Color = Color::srgb(0.910, 0.518, 0.173);
@@ -79,13 +76,19 @@ pub struct ShrinePlugin;
 
 impl Plugin for ShrinePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Run::Playing), spawn_shrines).add_systems(
+        app.add_systems(
+            OnEnter(Run::Playing),
+            (spawn_shrines, spawn_blessed_indicator),
+        )
+        .add_systems(
             Update,
             (
                 grant_standing_blessing,
+                highlight_shrines,
                 interact,
                 begin_cast,
                 tick_cast,
+                update_blessed_indicator,
                 fly_arrows,
             )
                 .chain()
@@ -98,6 +101,17 @@ impl Plugin for ShrinePlugin {
 pub struct Shrine {
     pub spent: bool,
 }
+
+/// Small floating diamond that marks an unspent shrine as interactable.
+#[derive(Component)]
+struct ShrineHint {
+    active: bool,
+}
+
+/// Temporary top-centre UI badge. Its simple nested squares can be replaced by
+/// an image later without changing any blessing logic.
+#[derive(Component)]
+struct BlessedIndicator;
 
 /// How much fire the blessing holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -168,18 +182,146 @@ pub struct FireArrow {
     velocity: Vec2,
 }
 
-fn spawn_shrines(mut commands: Commands, level: Option<Res<Level>>) {
+fn spawn_shrines(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    level: Option<Res<Level>>,
+) {
     let Some(level) = level else { return };
+    let image = asset_server.load(SHRINE_SPRITE_PATH);
+    let placements: Vec<Vec2> = SHRINE_MARKERS
+        .iter()
+        .flat_map(|marker| level.all_spawns(marker))
+        .collect();
 
-    for at in level.all_spawns(SHRINE_MARKER) {
+    for at in placements {
+        let shrine = commands
+            .spawn((
+                Name::new("Fire Shrine"),
+                Shrine { spent: false },
+                run_scoped(),
+                Sprite {
+                    image: image.clone(),
+                    custom_size: Some(SHRINE_SIZE),
+                    ..default()
+                },
+                // `at` is the marker's feet, so lift it by half its height.
+                Transform::from_xyz(at.x, at.y + SHRINE_SIZE.y / 2.0, 5.0),
+            ))
+            .id();
+
         commands.spawn((
-            Name::new("Shrine"),
-            Shrine { spent: false },
-            run_scoped(),
-            Sprite::from_color(SHRINE_DORMANT, SHRINE_SIZE),
-            // `at` is the marker's feet, so lift it by half its height to stand.
-            Transform::from_xyz(at.x, at.y + SHRINE_SIZE.y / 2.0, 5.0),
+            Name::new("Fire Shrine Interaction Hint"),
+            ShrineHint { active: true },
+            Sprite::from_color(Color::srgb(1.35, 0.82, 0.20), Vec2::splat(6.0)),
+            Transform::from_xyz(0.0, HINT_Y, 1.0)
+                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
+            ChildOf(shrine),
         ));
+    }
+}
+
+fn spawn_blessed_indicator(mut commands: Commands) {
+    commands
+        .spawn((
+            Name::new("Fire Blessing Indicator"),
+            BlessedIndicator,
+            run_scoped(),
+            Visibility::Hidden,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(14.0),
+                width: Val::Percent(100.0),
+                height: Val::Px(38.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent
+                .spawn((
+                    Node {
+                        width: Val::Px(36.0),
+                        height: Val::Px(36.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(7.0)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.30, 0.07, 0.025, 0.92)),
+                    BorderColor::all(Color::srgb(1.0, 0.48, 0.10)),
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Node {
+                            width: Val::Px(14.0),
+                            height: Val::Px(20.0),
+                            border_radius: BorderRadius::all(Val::Percent(45.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(1.0, 0.66, 0.12)),
+                    ));
+                });
+        });
+}
+
+fn update_blessed_indicator(
+    blessed_player: Query<(), (With<Player>, With<Blessed>)>,
+    mut indicators: Query<&mut Visibility, With<BlessedIndicator>>,
+) {
+    let visibility = if blessed_player.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+    for mut indicator in &mut indicators {
+        *indicator = visibility;
+    }
+}
+
+/// Warm the shrine gently at a distance and more strongly when the player is
+/// close enough to press E. The floating diamond supplies the interaction cue
+/// without requiring a font or UI overlay.
+fn highlight_shrines(
+    time: Res<Time>,
+    player: Query<&Transform, (With<Player>, Without<Shrine>)>,
+    mut shrines: Query<
+        (&Shrine, &Transform, &mut Sprite),
+        (Without<Player>, Without<ShrineHint>),
+    >,
+    mut hints: Query<
+        (&ShrineHint, &mut Transform, &mut Sprite, &mut Visibility),
+        (Without<Shrine>, Without<Player>),
+    >,
+) {
+    let player_at = player.single().ok().map(|transform| transform.translation.truncate());
+    let pulse = (time.elapsed_secs() * 3.5).sin() * 0.5 + 0.5;
+
+    for (shrine, transform, mut sprite) in &mut shrines {
+        if shrine.spent {
+            sprite.color = SHRINE_SPENT;
+            continue;
+        }
+
+        let near = player_at.is_some_and(|player| {
+            player.distance(transform.translation.truncate()) <= INTERACT_RANGE
+        });
+        let warmth = 0.06 + pulse * 0.07 + if near { 0.16 } else { 0.0 };
+        sprite.color = Color::srgb(1.0 + warmth, 1.0 + warmth * 0.55, 1.0 - warmth * 0.25);
+    }
+
+    for (hint, mut transform, mut sprite, mut visibility) in &mut hints {
+        *visibility = if hint.active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        transform.translation.y = HINT_Y + pulse * 2.5;
+        let size = 0.9 + pulse * 0.2;
+        transform.scale = Vec3::splat(size);
+        sprite.color = Color::srgba(1.35, 0.82, 0.20, 0.65 + pulse * 0.35);
     }
 }
 
@@ -188,7 +330,8 @@ fn interact(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut player: Query<(Entity, &Transform, &mut Sprite, &mut BaseTint), With<Player>>,
-    mut shrines: Query<(&mut Shrine, &Transform, &mut Sprite), Without<Player>>,
+    mut shrines: Query<(Entity, &mut Shrine, &Transform, &mut Sprite), Without<Player>>,
+    mut hints: Query<(&ChildOf, &mut ShrineHint)>,
 ) {
     if !keys.just_pressed(KeyCode::KeyE) {
         return;
@@ -198,7 +341,7 @@ fn interact(
     };
     let here = player_transform.translation.truncate();
 
-    for (mut shrine, transform, mut shrine_sprite) in &mut shrines {
+    for (shrine_entity, mut shrine, transform, mut shrine_sprite) in &mut shrines {
         if shrine.spent {
             continue;
         }
@@ -208,6 +351,11 @@ fn interact(
 
         shrine.spent = true;
         shrine_sprite.color = SHRINE_BLESSED;
+        for (child_of, mut hint) in &mut hints {
+            if child_of.parent() == shrine_entity {
+                hint.active = false;
+            }
+        }
         let restore = base.0;
         set_alight(&mut sprite, &mut base, BLESSED_TINT);
         commands
@@ -354,7 +502,7 @@ mod tests {
     use super::*;
     use crate::character::CharacterPlugin;
     use crate::combat::{CombatPlugin, MAX_HEALTH};
-    use crate::enemy::{Enemy, EnemyPlugin};
+    use crate::enemy::{EnemyPlugin, EnemyStandard};
     use crate::player::PlayerPlugin;
     use crate::run::RunPlugin;
     use bevy::time::TimeUpdateStrategy;
@@ -432,6 +580,13 @@ mod tests {
             .is_some()
     }
 
+    fn blessing_indicator_visible(app: &mut App) -> bool {
+        app.world_mut()
+            .query_filtered::<&Visibility, With<BlessedIndicator>>()
+            .single(app.world())
+            .is_ok_and(|visibility| *visibility == Visibility::Visible)
+    }
+
     fn arrows(app: &mut App) -> usize {
         app.world_mut()
             .query_filtered::<Entity, With<FireArrow>>()
@@ -441,7 +596,7 @@ mod tests {
 
     fn enemies(app: &mut App) -> usize {
         app.world_mut()
-            .query_filtered::<Entity, (With<Enemy>, Without<Dying>)>()
+            .query_filtered::<Entity, (With<EnemyStandard>, Without<Dying>)>()
             .iter(app.world())
             .count()
     }
@@ -452,9 +607,11 @@ mod tests {
         let here = player_at(&mut app);
         place_shrine(&mut app, here);
         assert!(!is_blessed(&mut app));
+        assert!(!blessing_indicator_visible(&mut app));
 
         tap(&mut app, KeyCode::KeyE);
         assert!(is_blessed(&mut app), "asking at the altar should be answered");
+        assert!(blessing_indicator_visible(&mut app));
     }
 
     #[test]
@@ -576,7 +733,7 @@ mod tests {
     fn clear_enemies(app: &mut App) {
         let existing: Vec<Entity> = app
             .world_mut()
-            .query_filtered::<Entity, With<Enemy>>()
+            .query_filtered::<Entity, With<EnemyStandard>>()
             .iter(app.world())
             .collect();
         for enemy in existing {
@@ -606,6 +763,7 @@ mod tests {
             !is_blessed(&mut app),
             "the fire should leave with the arrow"
         );
+        assert!(!blessing_indicator_visible(&mut app));
 
         // Ask again with nothing left to give.
         clear_arrows(&mut app);

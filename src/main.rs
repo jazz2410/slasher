@@ -2,6 +2,7 @@ mod animation;
 mod camera;
 mod character;
 mod combat;
+mod dev_menu;
 mod enemy;
 mod level;
 mod player;
@@ -37,6 +38,7 @@ fn main() {
             enemy::EnemyPlugin,
             shrine::ShrinePlugin,
             animation::AnimationPlugin,
+            dev_menu::DeveloperMenuPlugin,
         ))
         .run();
 }

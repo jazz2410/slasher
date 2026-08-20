@@ -12,7 +12,12 @@ use crate::world::GROUND_Y;
 const START_X: f32 = 180.0;
 /// Marker names accepted for an enemy placement, so the level can call it
 /// either thing.
-const SPAWN_MARKERS: [&str; 2] = ["EnemySpawn", "Enemy"];
+const SPAWN_MARKERS: [&str; 4] = [
+    "EnemyStandardSpawn",
+    "EnemyStandard",
+    "EnemySpawn",
+    "Enemy",
+];
 /// Both spartans share one spritesheet, so the enemy is tinted cold to keep the
 /// two readable at a glance.
 const TINT: Color = Color::srgb(0.55, 0.68, 1.0);
@@ -35,7 +40,7 @@ impl Plugin for EnemyPlugin {
 }
 
 #[derive(Component)]
-pub struct Enemy;
+pub struct EnemyStandard;
 
 #[derive(Component)]
 struct Brain {
@@ -43,27 +48,27 @@ struct Brain {
 }
 
 fn spawn_enemy(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Level>>) {
-    // One per Enemy marker in the level, or a single fallback without one.
+    // A real level is authoritative: no marker means no enemy. The fixed
+    // fallback exists only for isolated tests that intentionally load no level.
     let placements: Vec<Vec2> = match level.as_deref() {
         Some(level) => SPAWN_MARKERS
             .iter()
             .flat_map(|name| level.all_spawns(name))
             .collect(),
-        None => Vec::new(),
-    };
-    let placements = if !placements.is_empty() {
-        placements
-    } else if let Some(level) = level.as_deref() {
-        // No Enemy markers: put one on the ground a little way in.
-        vec![level.default_spawn() + Vec2::new(120.0, 0.0)]
-    } else {
-        vec![Vec2::new(START_X, GROUND_Y)]
+        None => vec![Vec2::new(START_X, GROUND_Y)],
     };
 
     for feet in placements {
-        let enemy = spawn_character(&mut commands, &kinds.spartan, "Enemy", feet, -1.0, TINT);
+        let enemy = spawn_character(
+            &mut commands,
+            &kinds.enemy_standard,
+            "EnemyStandard",
+            feet,
+            -1.0,
+            TINT,
+        );
         commands.entity(enemy).insert((
-            Enemy,
+            EnemyStandard,
             run_scoped(),
             Brain {
                 cooldown: Timer::from_seconds(ATTACK_COOLDOWN, TimerMode::Once),
@@ -74,10 +79,10 @@ fn spawn_enemy(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Leve
 
 fn think(
     time: Res<Time>,
-    player: Query<&Transform, (With<Player>, Without<Enemy>)>,
+    player: Query<&Transform, (With<Player>, Without<EnemyStandard>)>,
     mut enemies: Query<
         (&Transform, &mut Intent, &mut Facing, &mut Brain, Option<&Attacking>),
-        (With<Enemy>, Without<Dying>),
+        (With<EnemyStandard>, Without<Dying>),
     >,
 ) {
     let Ok(player_transform) = player.single() else {
@@ -109,5 +114,55 @@ fn think(
             intent.attack_pressed = true;
             brain.cooldown.reset();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::CharacterPlugin;
+    use crate::level::SpawnPoint;
+    use crate::run::RunPlugin;
+
+    fn app_with_level(spawns: Vec<SpawnPoint>) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<Image>()
+            .init_asset::<TextureAtlasLayout>()
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .insert_resource(Level::with_spawns(spawns))
+            .add_plugins((CharacterPlugin, EnemyPlugin, RunPlugin));
+        app.update();
+        app.update();
+        app
+    }
+
+    fn enemies(app: &mut App) -> usize {
+        app.world_mut()
+            .query_filtered::<Entity, With<EnemyStandard>>()
+            .iter(app.world())
+            .count()
+    }
+
+    #[test]
+    fn a_real_level_without_an_enemy_marker_stays_empty() {
+        let mut app = app_with_level(Vec::new());
+        assert_eq!(enemies(&mut app), 0);
+    }
+
+    #[test]
+    fn each_standard_enemy_marker_spawns_one_enemy() {
+        let mut app = app_with_level(vec![
+            SpawnPoint {
+                identifier: "EnemyStandardSpawn".into(),
+                at: Vec2::new(100.0, 0.0),
+            },
+            SpawnPoint {
+                identifier: "EnemyStandardSpawn".into(),
+                at: Vec2::new(200.0, 0.0),
+            },
+        ]);
+        assert_eq!(enemies(&mut app), 2);
     }
 }

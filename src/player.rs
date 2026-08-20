@@ -30,7 +30,7 @@ fn spawn_player(mut commands: Commands, kinds: Res<Kinds>, level: Option<Res<Lev
         None => Vec2::new(START_X, GROUND_Y),
     };
 
-    let player = spawn_character(&mut commands, &kinds.spartan, "Player", feet, 1.0, Color::WHITE);
+    let player = spawn_character(&mut commands, &kinds.player, "Player", feet, 1.0, Color::WHITE);
     commands.entity(player).insert((Player, run_scoped()));
 }
 
@@ -67,13 +67,16 @@ fn read_input(
 mod tests {
     use super::*;
     use crate::character::{
-        Blocking, CharacterPlugin, Dying, Reach, DEATH_DURATION, SPARTAN_BODY, SPARTAN_CLIPS,
-        SPARTAN_HURTBOX, SPARTAN_STATS,
+        Blocking, CharacterPlugin, Dying, Reach, DEATH_DURATION, ENEMY_STANDARD_ATTACK_DAMAGE,
+        ENEMY_STANDARD_CLIPS, ENEMY_STANDARD_MAX_HEALTH, PLAYER_ATTACK_DAMAGE,
+        PLAYER_MAX_HEALTH, PLAYER_STATS, SPARTAN_BODY, SPARTAN_HURTBOX,
     };
 
     /// The spartan's own numbers, so the tests move with the blueprint.
-    const ATTACK_DURATION: f32 = SPARTAN_STATS.attack.total();
-    use crate::combat::{CombatPlugin, Health, Hurt, CHIP_DAMAGE, MAX_HEALTH, SPEAR_DAMAGE};
+    const ATTACK_DURATION: f32 = PLAYER_STATS.attack.total();
+    use crate::combat::{
+        AttackDamage, CombatPlugin, Health, Hurt, CHIP_DAMAGE, MAX_HEALTH, SPEAR_DAMAGE,
+    };
     use crate::enemy::EnemyPlugin;
     use crate::run::{Run, RunPlugin};
     use bevy::time::TimeUpdateStrategy;
@@ -193,12 +196,12 @@ mod tests {
             if count == 1 {
                 hitbox_seen = true;
                 assert!(
-                    elapsed >= SPARTAN_STATS.attack.startup,
+                    elapsed >= PLAYER_STATS.attack.startup,
                     "hitbox live at {elapsed}s, before startup ends"
                 );
                 assert!(
                     elapsed
-                        < SPARTAN_STATS.attack.startup + SPARTAN_STATS.attack.active + DT,
+                        < PLAYER_STATS.attack.startup + PLAYER_STATS.attack.active + DT,
                     "hitbox still live at {elapsed}s, past the active window"
                 );
             }
@@ -361,7 +364,7 @@ mod tests {
                 Intent::default(),
                 // Without these `apply_physics` skips the dummy entirely, and
                 // its knockback would never decay.
-                SPARTAN_STATS,
+                PLAYER_STATS,
                 SPARTAN_BODY,
                 Health::full(MAX_HEALTH),
             ))
@@ -370,6 +373,29 @@ mod tests {
 
     fn health_of(app: &mut App, entity: Entity) -> Option<f32> {
         app.world().get::<Health>(entity).map(|h| h.current)
+    }
+
+    #[test]
+    fn player_and_standard_enemy_receive_their_own_combat_values() {
+        let mut app = duel_app();
+        let (player_health, player_damage) = app
+            .world_mut()
+            .query_filtered::<(&Health, &AttackDamage), With<Player>>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(player_health.max, PLAYER_MAX_HEALTH);
+        assert_eq!(player_damage.0, PLAYER_ATTACK_DAMAGE);
+
+        let (enemy_health, enemy_damage) = app
+            .world_mut()
+            .query_filtered::<
+                (&Health, &AttackDamage),
+                With<crate::enemy::EnemyStandard>,
+            >()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(enemy_health.max, ENEMY_STANDARD_MAX_HEALTH);
+        assert_eq!(enemy_damage.0, ENEMY_STANDARD_ATTACK_DAMAGE);
     }
 
     fn player_health(app: &mut App) -> f32 {
@@ -439,7 +465,7 @@ mod tests {
             app.update();
             if app
                 .world_mut()
-                .query_filtered::<Entity, (With<Attacking>, With<crate::enemy::Enemy>)>()
+                .query_filtered::<Entity, (With<Attacking>, With<crate::enemy::EnemyStandard>)>()
                 .iter(app.world())
                 .next()
                 .is_some()
@@ -468,7 +494,7 @@ mod tests {
 
         let staggered = app
             .world_mut()
-            .query_filtered::<Entity, (With<Hurt>, With<crate::enemy::Enemy>)>()
+            .query_filtered::<Entity, (With<Hurt>, With<crate::enemy::EnemyStandard>)>()
             .iter(app.world())
             .next()
             .is_some();
@@ -534,7 +560,11 @@ mod tests {
             "died on frame {died_at} but the run never came back"
         );
         assert_eq!(count::<Player>(&mut app), 1, "the player should be back");
-        assert_eq!(count::<crate::enemy::Enemy>(&mut app), 1, "so should the enemy");
+        assert_eq!(
+            count::<crate::enemy::EnemyStandard>(&mut app),
+            1,
+            "so should the enemy"
+        );
     }
 
     /// The full plugin set, as `main.rs` assembles it minus rendering. The
@@ -604,7 +634,7 @@ mod tests {
     #[test]
     fn dying_restarts_the_level() {
         let mut app = duel_app();
-        let enemies_at_start = count::<crate::enemy::Enemy>(&mut app);
+        let enemies_at_start = count::<crate::enemy::EnemyStandard>(&mut app);
         assert!(enemies_at_start > 0, "the duel should start with an enemy");
         assert_eq!(run_state(&app), Run::Playing);
 
@@ -627,7 +657,7 @@ mod tests {
         }
         assert_eq!(run_state(&app), Run::Ended, "death should end the run");
         assert_eq!(count::<Player>(&mut app), 0, "the run should be torn down");
-        assert_eq!(count::<crate::enemy::Enemy>(&mut app), 0);
+        assert_eq!(count::<crate::enemy::EnemyStandard>(&mut app), 0);
 
         // ...and comes back.
         for _ in 0..120 {
@@ -640,7 +670,7 @@ mod tests {
         assert_eq!(run_state(&app), Run::Playing, "the level should restart");
         assert_eq!(count::<Player>(&mut app), 1, "exactly one player, not two");
         assert_eq!(
-            count::<crate::enemy::Enemy>(&mut app),
+            count::<crate::enemy::EnemyStandard>(&mut app),
             enemies_at_start,
             "the enemies should be back, and only once each"
         );
@@ -655,7 +685,7 @@ mod tests {
     #[test]
     fn repeated_deaths_do_not_accumulate() {
         let mut app = duel_app();
-        let enemies = count::<crate::enemy::Enemy>(&mut app);
+        let enemies = count::<crate::enemy::EnemyStandard>(&mut app);
 
         for round in 0..3 {
             {
@@ -670,7 +700,7 @@ mod tests {
             }
             assert_eq!(count::<Player>(&mut app), 1, "round {round}: one player");
             assert_eq!(
-                count::<crate::enemy::Enemy>(&mut app),
+                count::<crate::enemy::EnemyStandard>(&mut app),
                 enemies,
                 "round {round}: enemies should not stack up"
             );
@@ -714,7 +744,7 @@ mod tests {
         let mut app = duel_app();
         let enemy = app
             .world_mut()
-            .query_filtered::<Entity, With<crate::enemy::Enemy>>()
+            .query_filtered::<Entity, With<crate::enemy::EnemyStandard>>()
             .single(app.world())
             .unwrap();
         app.world_mut().get_mut::<Health>(enemy).unwrap().current = 0.0;
@@ -724,7 +754,7 @@ mod tests {
         assert!(app.world().get::<Dying>(enemy).is_some());
         assert_eq!(
             *app.world().get::<crate::animation::AnimationClip>(enemy).unwrap(),
-            SPARTAN_CLIPS.death
+            ENEMY_STANDARD_CLIPS.death
         );
     }
 
