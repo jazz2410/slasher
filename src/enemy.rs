@@ -23,9 +23,9 @@ const SPAWN_MARKERS: [&str; 4] = [
     "Enemy",
 ];
 const ARCHER_MARKERS: [&str; 2] = ["Archer", "ArcherSpawn"];
-/// Both spartans share one spritesheet, so the enemy is tinted cold to keep the
-/// two readable at a glance.
-const TINT: Color = Color::srgb(0.55, 0.68, 1.0);
+/// The supplied enemy art already has distinct black armour and purple cloth,
+/// so preserve its authored colours rather than multiplying in another tint.
+const TINT: Color = Color::WHITE;
 
 /// Beyond this he ignores you.
 const SIGHT_RANGE: f32 = 420.0;

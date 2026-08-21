@@ -24,29 +24,33 @@ const GRAVITY: f32 = -1200.0;
 const JUMP_CUT_MULTIPLIER: f32 = 0.45;
 
 // ---------------------------------------------------------------------------
-// The spartan, as data. Copy this block to describe a different fighter.
+// Fighter art, as data. Copy a block to describe a different fighter.
 // ---------------------------------------------------------------------------
 
-/// `spartan_combat.png` is 540x576 — a 5x9 grid of 108x64 cells, stacked by
-/// `tools/build_sheet.py`. Row 0 is the walk cycle, rows 1-3 one continuous
-/// 15-frame thrust, rows 4-8 the 25-frame fire blast the shrine grants. The cell is far wider
-/// than the character so the spear has room to extend while the body stays
-/// centred (which is what lets `flip_x` mirror in place).
-const SPARTAN_SHEET: &str = "sprites/spartan_combat.png";
-const SPARTAN_FRAME: UVec2 = UVec2::new(108, 64);
-const SPARTAN_COLUMNS: u32 = 5;
-const SPARTAN_ROWS: u32 = 9;
-/// Death has its own wider atlas because the fallen body and spear cannot fit
-/// inside the combat sheet's 108-pixel cells without being cropped.
-const SPARTAN_DEATH_SHEET: &str = "sprites/spartan_dies_game.png";
-const SPARTAN_DEATH_FRAME: UVec2 = UVec2::new(146, 96);
-const SPARTAN_DEATH_COLUMNS: u32 = 5;
-const SPARTAN_DEATH_ROWS: u32 = 5;
-/// Frames in the thrust, spanning rows 1-3.
-const SPARTAN_ATTACK_FRAMES: f32 = 15.0;
-/// Frames in the fire blast, spanning rows 4-8.
-const SPARTAN_CAST_FRAMES: f32 = 25.0;
-const SPARTAN_DEATH_FRAMES: f32 = 25.0;
+/// The player's atlas is built from the four action rows in
+/// `spartan_sprites.png`. The combat sheet contains walk, thrust, and special;
+/// death stays separate so changing art cannot disturb a corpse mid-animation.
+const PLAYER_SHEET: &str = "sprites/player_combat.png";
+const PLAYER_FRAME: UVec2 = UVec2::new(128, 96);
+const PLAYER_COLUMNS: u32 = 6;
+const PLAYER_ROWS: u32 = 5;
+const PLAYER_DEATH_SHEET: &str = "sprites/player_dies_game.png";
+const PLAYER_DEATH_FRAME: UVec2 = UVec2::new(128, 96);
+const PLAYER_DEATH_COLUMNS: u32 = 6;
+const PLAYER_DEATH_ROWS: u32 = 1;
+const PLAYER_ACTION_FRAMES: f32 = 6.0;
+
+/// The standard enemy's new sheet has six walking frames followed by six sword
+/// attack frames. Death remains a separate six-frame row.
+const ENEMY_STANDARD_SHEET: &str = "sprites/enemy_standard_combat.png";
+const ENEMY_STANDARD_FRAME: UVec2 = UVec2::new(128, 96);
+const ENEMY_STANDARD_COLUMNS: u32 = 6;
+const ENEMY_STANDARD_ROWS: u32 = 2;
+const ENEMY_STANDARD_DEATH_SHEET: &str = "sprites/enemy_standard_dies_game.png";
+const ENEMY_STANDARD_DEATH_FRAME: UVec2 = UVec2::new(128, 96);
+const ENEMY_STANDARD_DEATH_COLUMNS: u32 = 6;
+const ENEMY_STANDARD_DEATH_ROWS: u32 = 1;
+const ENEMY_STANDARD_ACTION_FRAMES: f32 = 6.0;
 
 /// The archer uses the same five-column convention, but his standing frames
 /// need two extra pixels of headroom for the raised bow.
@@ -70,12 +74,13 @@ pub const ARCHER_ATTACK_DAMAGE: f32 = 25.0;
 pub const PLAYER_STATS: Stats = Stats {
     run_speed: 160.0,
     jump_speed: 420.0,
-    // Modest forward drive so the thrust travels instead of rooting in place.
-    lunge_speed: 90.0,
+    // Keep the player planted during the supplied thrust animation. The spear
+    // reaches through its hitbox; moving the body here makes the feet slide.
+    lunge_speed: 0.0,
     attack: AttackTiming {
-        startup: 0.09,
-        active: 0.10,
-        recovery: 0.13,
+        startup: 0.21,
+        active: 0.14,
+        recovery: 0.35,
     },
 };
 
@@ -130,26 +135,46 @@ pub const SPARTAN_REACH: Reach = Reach {
 pub const SPARTAN_HURTBOX: Vec2 = Vec2::new(26.0, 54.0);
 pub const ARCHER_HURTBOX: Vec2 = Vec2::new(23.0, 49.0);
 
-const fn spartan_clips(stats: Stats) -> Clips {
+const fn enemy_standard_clips(stats: Stats) -> Clips {
     Clips {
         idle: AnimationClip::still(0),
-        walk: AnimationClip::new(0, 4, 0.09),
-        airborne: AnimationClip::still(2),
-        // Match the visual thrust to this blueprint's own attack timing.
-        attack: AnimationClip::new(
-            5,
-            19,
-            stats.attack.total() / SPARTAN_ATTACK_FRAMES,
+        walk: AnimationClip::new(0, 5, 0.065),
+        airborne: AnimationClip::still(0),
+        attack: AnimationClip::once(
+            6,
+            11,
+            stats.attack.total() / ENEMY_STANDARD_ACTION_FRAMES,
         ),
-        block: AnimationClip::still(5),
-        block_impact: AnimationClip::still(5),
-        cast: AnimationClip::new(20, 44, CAST_DURATION / SPARTAN_CAST_FRAMES),
-        death: AnimationClip::once(0, 24, DEATH_DURATION / SPARTAN_DEATH_FRAMES),
+        block: AnimationClip::still(6),
+        block_impact: AnimationClip::still(6),
+        cast: AnimationClip::still(0),
+        death: AnimationClip::once(
+            0,
+            5,
+            DEATH_DURATION / ENEMY_STANDARD_ACTION_FRAMES,
+        ),
     }
 }
 
-pub const PLAYER_CLIPS: Clips = spartan_clips(PLAYER_STATS);
-pub const ENEMY_STANDARD_CLIPS: Clips = spartan_clips(ENEMY_STANDARD_STATS);
+pub const PLAYER_CLIPS: Clips = Clips {
+    // A restrained breathing cycle: six frames over 1.5 seconds.
+    idle: AnimationClip::new(18, 23, 0.25),
+    // Six frames at this cadence cover roughly one 62px stride at 160px/s.
+    // A slower cycle makes the planted feet skate across the ground.
+    walk: AnimationClip::new(0, 5, 0.065),
+    airborne: AnimationClip::once(24, 29, 0.10),
+    attack: AnimationClip::once(
+        6,
+        11,
+        PLAYER_STATS.attack.total() / PLAYER_ACTION_FRAMES,
+    ),
+    block: AnimationClip::still(6),
+    block_impact: AnimationClip::still(6),
+    // The third source row is the shrine-granted special sequence.
+    cast: AnimationClip::once(12, 17, CAST_DURATION / PLAYER_ACTION_FRAMES),
+    death: AnimationClip::once(0, 5, DEATH_DURATION / PLAYER_ACTION_FRAMES),
+};
+pub const ENEMY_STANDARD_CLIPS: Clips = enemy_standard_clips(ENEMY_STANDARD_STATS);
 
 pub const ARCHER_CLIPS: Clips = Clips {
     idle: AnimationClip::still(0),
@@ -170,9 +195,8 @@ pub const ARCHER_CLIPS: Clips = Clips {
 
 /// How long the player is committed to a shrine-granted cast.
 ///
-/// Paced to the 25-frame animation at ~32ms a frame: long enough for the fire
-/// to visibly gather before it goes, which is what makes the commitment read as
-/// deliberate rather than as a second sword swing.
+/// Paced to the 25-frame throw animation at ~32ms a frame: long enough to show
+/// the wind-up and release rather than reading as a second sword swing.
 pub const CAST_DURATION: f32 = 0.8;
 /// Time given to the complete fall-and-smoke animation before an enemy is
 /// removed or the player's run ends.
@@ -322,19 +346,35 @@ fn load_kinds(
     asset_server: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    let image = asset_server.load(SPARTAN_SHEET);
-    let layout = layouts.add(TextureAtlasLayout::from_grid(
-        SPARTAN_FRAME,
-        SPARTAN_COLUMNS,
-        SPARTAN_ROWS,
+    let player_image = asset_server.load(PLAYER_SHEET);
+    let player_layout = layouts.add(TextureAtlasLayout::from_grid(
+        PLAYER_FRAME,
+        PLAYER_COLUMNS,
+        PLAYER_ROWS,
         None,
         None,
     ));
-    let death_image = asset_server.load(SPARTAN_DEATH_SHEET);
-    let death_layout = layouts.add(TextureAtlasLayout::from_grid(
-        SPARTAN_DEATH_FRAME,
-        SPARTAN_DEATH_COLUMNS,
-        SPARTAN_DEATH_ROWS,
+    let player_death_image = asset_server.load(PLAYER_DEATH_SHEET);
+    let player_death_layout = layouts.add(TextureAtlasLayout::from_grid(
+        PLAYER_DEATH_FRAME,
+        PLAYER_DEATH_COLUMNS,
+        PLAYER_DEATH_ROWS,
+        None,
+        None,
+    ));
+    let standard_image = asset_server.load(ENEMY_STANDARD_SHEET);
+    let standard_layout = layouts.add(TextureAtlasLayout::from_grid(
+        ENEMY_STANDARD_FRAME,
+        ENEMY_STANDARD_COLUMNS,
+        ENEMY_STANDARD_ROWS,
+        None,
+        None,
+    ));
+    let standard_death_image = asset_server.load(ENEMY_STANDARD_DEATH_SHEET);
+    let standard_death_layout = layouts.add(TextureAtlasLayout::from_grid(
+        ENEMY_STANDARD_DEATH_FRAME,
+        ENEMY_STANDARD_DEATH_COLUMNS,
+        ENEMY_STANDARD_DEATH_ROWS,
         None,
         None,
     ));
@@ -355,34 +395,37 @@ fn load_kinds(
         None,
     ));
 
-    let kind = |clips, stats, max_health, attack_damage| CharacterKind {
-        image: image.clone(),
-        layout: layout.clone(),
-        clips,
+    let enemy_standard = CharacterKind {
+        image: standard_image,
+        layout: standard_layout,
+        clips: ENEMY_STANDARD_CLIPS,
         reach: SPARTAN_REACH,
         hurtbox: SPARTAN_HURTBOX,
         body: SPARTAN_BODY,
-        stats,
-        max_health,
-        attack_damage,
+        stats: ENEMY_STANDARD_STATS,
+        max_health: ENEMY_STANDARD_MAX_HEALTH,
+        attack_damage: ENEMY_STANDARD_ATTACK_DAMAGE,
         attack_style: AttackStyle::Melee,
-        death_image: death_image.clone(),
-        death_layout: death_layout.clone(),
+        death_image: standard_death_image,
+        death_layout: standard_death_layout,
     };
 
     commands.insert_resource(Kinds {
-        player: kind(
-            PLAYER_CLIPS,
-            PLAYER_STATS,
-            PLAYER_MAX_HEALTH,
-            PLAYER_ATTACK_DAMAGE,
-        ),
-        enemy_standard: kind(
-            ENEMY_STANDARD_CLIPS,
-            ENEMY_STANDARD_STATS,
-            ENEMY_STANDARD_MAX_HEALTH,
-            ENEMY_STANDARD_ATTACK_DAMAGE,
-        ),
+        player: CharacterKind {
+            image: player_image,
+            layout: player_layout,
+            clips: PLAYER_CLIPS,
+            reach: SPARTAN_REACH,
+            hurtbox: SPARTAN_HURTBOX,
+            body: SPARTAN_BODY,
+            stats: PLAYER_STATS,
+            max_health: PLAYER_MAX_HEALTH,
+            attack_damage: PLAYER_ATTACK_DAMAGE,
+            attack_style: AttackStyle::Melee,
+            death_image: player_death_image,
+            death_layout: player_death_layout,
+        },
+        enemy_standard,
         archer: CharacterKind {
             image: archer_image,
             layout: archer_layout,
@@ -529,7 +572,7 @@ pub fn spawn_character(
         kind.image.clone(),
         TextureAtlas {
             layout: kind.layout.clone(),
-            index: 0,
+            index: kind.clips.idle.first,
         },
     );
     sprite.color = tint;
@@ -562,7 +605,7 @@ pub fn spawn_character(
                 kind.attack_style,
             ),
             // Current animation state, seeded from the blueprint's clips.
-            (kind.clips.idle, AnimationTimer::from_clip(&kind.clips.walk)),
+            (kind.clips.idle, AnimationTimer::from_clip(&kind.clips.idle)),
             Health::full(kind.max_health),
             AttackDamage(kind.attack_damage),
             run_scoped(),

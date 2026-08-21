@@ -207,44 +207,49 @@ validates it against LDtk's published JSON schema.
 
 ## Sprites
 
-The game loads `assets/sprites/spartan_combat.png` — a 540x576 atlas, 5x9 cells
-of 108x64. Frame constants live at the top of
+The player loads `assets/sprites/player_combat.png` — a 768x480 atlas with
+6x5 cells of 128x96. Its first three rows come from
+`assets/sprites/spartan_sprites.png`; idle and jump come from
+`assets/sprites/spartan_idle_jump.png`.
+
+| Rows | Indices | Player animation |
+| --- | --- | --- |
+| 0 | 0-5 | Walk |
+| 1 | 6-11 | Normal thrust |
+| 2 | 12-17 | Throw spear (`L` special) |
+| 3 | 18-23 | Idle cycle |
+| 4 | 24-29 | Jump cycle |
+
+Death uses `player_dies_game.png`, a separate six-frame row of 128x96 cells.
+The importer preserves spear and cape pixels that cross the source image's
+nominal 256px divisions, removes its faint alpha backdrop, and puts every pose
+on the same feet baseline. To rebuild all player assets:
+
+```sh
+python3 tools/build_player_idle_jump.py
+python3 tools/build_player_sheet.py
+```
+
+The script also saves the four individual action rows as
+`player_walk_game.png`, `player_thrust_game.png`, `player_throw_game.png`,
+`player_idle_game.png`, `player_jump_game.png`, and `player_dies_game.png`.
+
+`EnemyStandard` uses `assets/sprites/enemy_standard_combat.png`, a 6x2 atlas of
+128x96 cells generated from `assets/sprites/enemyStandard.png`. Frame constants live at the top of
 [src/character.rs](src/character.rs).
 
 | Rows | Indices | Animation |
 | --- | --- | --- |
-| 0 | 0-4 | Walk cycle |
-| 1-3 | 5-19 | Spear thrust, one continuous 15 frames |
-| 4-8 | 20-44 | Fire blast, 25 frames |
+| 0 | 0-5 | Walk cycle |
+| 1 | 6-11 | Sword attack |
 
-That atlas is **generated**. `tools/build_sheet.py` stacks the already-gridded
-source sheets into it, checking they agree on cell size and that every frame is
-baselined identically — a drift between sheets shows up in game as the character
-popping when the animation changes. Re-run it after replacing either sheet:
+The enemy atlas and its separate six-frame death row are **generated**. The
+importer removes the presentation background and headings, preserves detached
+sword effects, and shares one ground anchor across every pose:
 
 ```sh
-python3 tools/build_sheet.py
+python3 tools/build_enemy_standard_sheet.py
 ```
-
-| Source | Contributes |
-| --- | --- |
-| `spartan_walk.png` | row 0, indices 0-4 |
-| `spartan_attack_game.png` | rows 1-3, indices 5-19 |
-| `spartan_firespear_game.png` | rows 4-8, indices 20-44 |
-
-Death uses its own `spartan_dies_game.png` atlas: 25 frames in a 5x5 grid of
-146x96 cells. It stays separate because the fallen body and spear are wider
-than the combat atlas cells. Regenerate it from `spartan_dies.png` with:
-
-```sh
-python3 tools/process_sprite.py assets/sprites/spartan_dies.png \
-    --out assets/sprites/spartan_dies_game.png --frames-per-row 5 \
-    --cell-width 146 --cell-height 96 --target-height 54 --baseline-from-top 78 \
-    --prone-anchor-ratio 0.63
-```
-
-The taller cells leave room for the smoke while keeping the character's feet
-on the same in-game baseline as every standing animation.
 
 `process_sprite.py` produced that last one from `spartan_firespear.png`:
 

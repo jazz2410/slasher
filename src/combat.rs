@@ -52,6 +52,9 @@ const BAR_BACKING: Color = Color::srgba(0.04, 0.03, 0.03, 0.85);
 /// Bronze at full, blood at empty — palette colours, so it belongs to the world.
 const BAR_FULL: Color = Color::srgb(0.659, 0.498, 0.271);
 const BAR_EMPTY: Color = Color::srgb(0.639, 0.110, 0.094);
+/// Corpses stay above level props but below living fighters, so overlapping a
+/// fallen body never produces a half-hidden player with only his feet visible.
+const CORPSE_Z: f32 = 8.0;
 
 pub struct CombatPlugin;
 
@@ -361,15 +364,23 @@ fn update_health_bars(
 fn begin_deaths(
     mut commands: Commands,
     mut fighters: Query<
-        (Entity, &Health, Option<&Attacking>, Option<&mut Sprite>, &BaseTint),
+        (
+            Entity,
+            &Health,
+            Option<&Attacking>,
+            Option<&mut Sprite>,
+            &BaseTint,
+            &mut Transform,
+        ),
         (With<Character>, Without<Dying>),
     >,
 ) {
-    for (entity, health, attacking, sprite, base) in &mut fighters {
+    for (entity, health, attacking, sprite, base, mut transform) in &mut fighters {
         if !health.is_spent() {
             continue;
         }
 
+        transform.translation.z = CORPSE_Z;
         if let Some(mut sprite) = sprite {
             sprite.color = base.0;
         }

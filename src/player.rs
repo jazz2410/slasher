@@ -69,7 +69,7 @@ mod tests {
     use crate::character::{
         Blocking, CharacterPlugin, Dying, Reach, DEATH_DURATION, ENEMY_STANDARD_ATTACK_DAMAGE,
         ENEMY_STANDARD_CLIPS, ENEMY_STANDARD_MAX_HEALTH, PLAYER_ATTACK_DAMAGE,
-        PLAYER_MAX_HEALTH, PLAYER_STATS, SPARTAN_BODY, SPARTAN_HURTBOX,
+        PLAYER_CLIPS, PLAYER_MAX_HEALTH, PLAYER_STATS, SPARTAN_BODY, SPARTAN_HURTBOX,
     };
 
     /// The spartan's own numbers, so the tests move with the blueprint.
@@ -396,6 +396,72 @@ mod tests {
             .unwrap();
         assert_eq!(enemy_health.max, ENEMY_STANDARD_MAX_HEALTH);
         assert_eq!(enemy_damage.0, ENEMY_STANDARD_ATTACK_DAMAGE);
+    }
+
+    #[test]
+    fn player_uses_the_new_art_and_throw_clip_without_changing_the_enemy() {
+        let mut app = duel_app();
+        let player_image = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<Player>>()
+            .single(app.world())
+            .unwrap()
+            .image
+            .clone();
+        let enemy_image = app
+            .world_mut()
+            .query_filtered::<&Sprite, With<crate::enemy::EnemyStandard>>()
+            .single(app.world())
+            .unwrap()
+            .image
+            .clone();
+
+        assert_ne!(player_image, enemy_image);
+        let (initial_clip, initial_timer, initial_sprite) = app
+            .world_mut()
+            .query_filtered::<
+                (
+                    &crate::animation::AnimationClip,
+                    &crate::animation::AnimationTimer,
+                    &Sprite,
+                ),
+                With<Player>,
+            >()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(*initial_clip, PLAYER_CLIPS.idle);
+        assert_eq!(
+            initial_timer.0.duration().as_secs_f32(),
+            PLAYER_CLIPS.idle.frame_duration,
+            "a fresh player must not run idle on the walk timer"
+        );
+        assert_eq!(
+            initial_sprite.texture_atlas.as_ref().unwrap().index,
+            PLAYER_CLIPS.idle.first,
+            "a fresh player must begin on the first idle frame"
+        );
+        assert_eq!((PLAYER_CLIPS.walk.first, PLAYER_CLIPS.walk.last), (0, 5));
+        assert_eq!((PLAYER_CLIPS.attack.first, PLAYER_CLIPS.attack.last), (6, 11));
+        assert_eq!((PLAYER_CLIPS.cast.first, PLAYER_CLIPS.cast.last), (12, 17));
+        assert_eq!((PLAYER_CLIPS.idle.first, PLAYER_CLIPS.idle.last), (18, 23));
+        assert_eq!((PLAYER_CLIPS.airborne.first, PLAYER_CLIPS.airborne.last), (24, 29));
+        assert!(PLAYER_CLIPS.idle.repeat, "the idle cycle should loop");
+        assert!(!PLAYER_CLIPS.airborne.repeat, "the jump cycle should play once");
+        assert_eq!((PLAYER_CLIPS.death.first, PLAYER_CLIPS.death.last), (0, 5));
+        let thrust_frames = (PLAYER_CLIPS.attack.last - PLAYER_CLIPS.attack.first + 1) as f32;
+        assert!(
+            PLAYER_STATS.attack.total() >= thrust_frames / 60.0,
+            "the attack state must last long enough to display every thrust frame at 60 FPS"
+        );
+        assert_eq!(
+            PLAYER_STATS.lunge_speed, 0.0,
+            "the thrust art must stay planted instead of sliding over the ground"
+        );
+        assert_eq!(
+            (ENEMY_STANDARD_CLIPS.attack.first, ENEMY_STANDARD_CLIPS.attack.last),
+            (6, 11),
+            "EnemyStandard should use its own sword-attack row"
+        );
     }
 
     fn player_health(app: &mut App) -> f32 {
@@ -732,6 +798,10 @@ mod tests {
         assert!(
             app.world().get_entity(dummy).is_ok(),
             "a defeated fighter should hold the final death frame"
+        );
+        assert!(
+            app.world().get::<Transform>(dummy).unwrap().translation.z < 10.0,
+            "a corpse should render behind living fighters"
         );
         assert!(
             app.world().get::<crate::combat::Hurtbox>(dummy).is_none(),
